@@ -15,32 +15,72 @@ def main():
     table_name = 'transactions'
 
     with engine.connect() as conn:
-        conn.execute(text(f"CREATE TABLE IF NOT EXISTS {table_name} (date TEXT DEFAULT CURRENT_TIMESTAMP, description TEXT, amount REAL, category TEXT)"))
-
-    #add_transaction(engine, table_name, description, amount, category)
-    #show_transactions(engine, table_name)
+        conn.execute(text(f'''
+        CREATE TABLE IF NOT EXISTS {table_name} 
+        (
+        date TEXT DEFAULT CURRENT_TIMESTAMP,
+        description TEXT,
+        amount REAL, 
+        category TEXT
+        )
+        '''))
 
     # User input loop
     while True:
-        print("\nChoose an input")
+        print("\nChoose an input:")
         print("1. Add transaction")
         print("2. Show transactions")
-        print("3. Quit")
+        print("3. Search transactions")
+        print("4. Quit")
         choice = input("> ")
 
         if choice == "1":
             description = input("Description: ")
             amount = input("Amount: ")
-            category = input("category: ")
+            category = input("Category: ")
             add_transaction(engine, table_name, description, amount, category)
         elif choice == "2":
             show_transactions(engine, table_name)
         elif choice == "3":
-            print("Goodbye ;(")
+            description = input("Description: ")
+            amount = input("Amount: ")
+            category = input("Category: ")
+            search_transactions(engine, table_name, description, amount, category)
+        elif choice == "4":
+            print("Goodbye :)")
             break
         else:
             print("Unknown command")
 
+def search_transactions(engine, table_name, description=None, amount=None, category=None, match_any=True):
+    filters = []
+    params = {}
+    if category:
+        filters.append("category LIKE :category")
+        params['category'] = f"%{category}%"
+    if description:
+        filters.append("description LIKE :description")
+        params['description'] = f"%{description}%"
+    if amount:
+        filters.append("amount = :amount")
+        params['amount'] = float(amount)
+
+
+    query = f"SELECT * FROM {table_name}"
+    if filters:
+        connector = " OR " if match_any else " AND "
+        query += " WHERE " + connector.join(filters)
+
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params)
+        rows = result.fetchall()
+
+    if rows:
+        df = pd.DataFrame(rows, columns=result.keys())
+        print("\nMatching transactions:")
+        print(df)
+    else:
+        print("No matching transactions found :(")
 
 
 def show_transactions(engine, table_name):

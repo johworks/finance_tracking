@@ -13,8 +13,14 @@ Version 0.1:
     description, category, and amount. This is actually already pretty useful just to
     keep a broad inventory (better word for this) of expenses.
 
+Version 0.2:
+
+    Added the ability to search for specific transactions. Fields are optional, just press enter to
+    skip them. Partial matches sort of work, e.g. "monitor" will match "LED monitor." 
 
 Planned features:
-    - Delete transactions
-    - Sum expenses (total, by category, date range)
-    - Web portal for GUI management
+    [x] Search for specific transactions
+    [ ] Sum expenses (total, by category, date range)
+    [ ] Web portal for GUI management
+    [ ] Timed subscriptions
+    [ ] Monthly report
