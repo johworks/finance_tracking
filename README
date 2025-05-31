@@ -5,3 +5,16 @@ I want to create a simple finance management application that I can use to do a 
         - Expenses ( categories, people )
 
     - Show the information on a website
+
+
+Version 0.1:
+
+    There is currently very limited functionality. It is able to take in inputs with a 
+    description, category, and amount. This is actually already pretty useful just to
+    keep a broad inventory (better word for this) of expenses.
+
+
+Planned features:
+    - Delete transactions
+    - Sum expenses (total, by category, date range)
+    - Web portal for GUI management
