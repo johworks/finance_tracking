@@ -1,0 +1,63 @@
+# Allow a user to log which transactions they have made
+# It will require a user to enter:
+# type
+# amount
+# extra information
+
+import pandas as pd
+from sqlalchemy import create_engine, text
+from datetime import datetime
+
+def main():
+
+    # Create or connect to an SQLite database
+    engine = create_engine('sqlite:///transactions.db')
+    table_name = 'transactions'
+
+    with engine.connect() as conn:
+        conn.execute(text(f"CREATE TABLE IF NOT EXISTS {table_name} (date TEXT DEFAULT CURRENT_TIMESTAMP, description TEXT, amount REAL, category TEXT)"))
+
+    #add_transaction(engine, table_name, description, amount, category)
+    #show_transactions(engine, table_name)
+
+    # User input loop
+    while True:
+        print("\nChoose an input")
+        print("1. Add transaction")
+        print("2. Show transactions")
+        print("3. Quit")
+        choice = input("> ")
+
+        if choice == "1":
+            description = input("Description: ")
+            amount = input("Amount: ")
+            category = input("category: ")
+            add_transaction(engine, table_name, description, amount, category)
+        elif choice == "2":
+            show_transactions(engine, table_name)
+        elif choice == "3":
+            print("Goodbye ;(")
+            break
+        else:
+            print("Unknown command")
+
+
+
+def show_transactions(engine, table_name):
+    df = pd.read_sql(table_name, engine)
+    print("\nAll Transactions:")
+    print(df)
+
+def add_transaction(engine, table_name, description, amount, category):
+    date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    new_row = pd.DataFrame([{
+        'date': date,
+        'description': description,
+        'amount': amount,
+        'category': category
+    }])
+    new_row.to_sql(table_name, engine, if_exists='append', index=False)
+    print(f"Added transaction: {description} (${amount}) on {date}")
+
+if __name__ == "__main__":
+    main()
