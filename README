@@ -18,9 +18,15 @@ Version 0.2:
     Added the ability to search for specific transactions. Fields are optional, just press enter to
     skip them. Partial matches sort of work, e.g. "monitor" will match "LED monitor." 
 
+Version 0.3:
+
+    Added the ability to sum the total cost, cost by cateogory and cost by date range. Right now this is
+    early on. It's not something that can be controlled by the user, it's hardcoded. I want these fields
+    to be controlled by the web UI.
+
 Planned features:
     [x] Search for specific transactions
-    [ ] Sum expenses (total, by category, date range)
+    [x] Sum expenses (total, by category, date range)
     [ ] Web portal for GUI management
     [ ] Timed subscriptions
     [ ] Monthly report

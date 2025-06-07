@@ -31,7 +31,8 @@ def main():
         print("1. Add transaction")
         print("2. Show transactions")
         print("3. Search transactions")
-        print("4. Quit")
+        print("4. Summary")
+        print("5. Quit")
         choice = input("> ")
 
         if choice == "1":
@@ -45,12 +46,67 @@ def main():
             description = input("Description: ")
             amount = input("Amount: ")
             category = input("Category: ")
-            search_transactions(engine, table_name, description, amount, category)
+            rows, result = search_transactions(engine, table_name, description, amount, category)
+            if rows:
+                show_transactions(engine, table_name, rows, result)
         elif choice == "4":
+            show_summary(engine, table_name)
+        elif choice == "5":
             print("Goodbye :)")
             break
         else:
             print("Unknown command")
+
+def show_summary(engine, table_name):
+
+    print("Summary function -- REMOVE AFTER TESTING")
+
+    # End goal: sum by total, category, date range
+    # I want to first start by getting the total sum
+
+    # I think I should somehow use the search_transactions
+    # function to narrow down the values to print
+    # To refactor, lower the scope of search_transactions
+    # to return the SQL object instead of printing directly
+
+    # Sum the entire amount coloumn
+    query = f"SELECT sum(amount) FROM {table_name}"
+
+    with engine.connect() as conn:
+        result = conn.execute(text(query))
+        rows = result.fetchall()
+
+    if rows:
+        show_transactions(engine, table_name, rows, result)
+
+    # Sum by category
+    query = f"SELECT category, SUM(amount) AS total_amount FROM {table_name} GROUP BY category"
+
+    with engine.connect() as conn:
+        result = conn.execute(text(query))
+        rows = result.fetchall()
+
+    if rows:
+        show_transactions(engine, table_name, rows, result)
+
+    # Narrow down to a date range
+    query = f"SELECT category, SUM(amount) AS total_amount FROM {table_name}"
+    query += " WHERE date >= DATE('now', '-3 days')  GROUP BY category"
+
+    with engine.connect() as conn:
+        result = conn.execute(text(query))
+        rows = result.fetchall()
+
+    if rows:
+        show_transactions(engine, table_name, rows, result)
+
+    #if rows:
+    #    df = pd.DataFrame(rows, columns=result.keys())
+    #    print("\nMatching transactions:")
+    #    print(df)
+    #else:
+    #    print("No matching transactions found :(")
+
 
 def search_transactions(engine, table_name, description=None, amount=None, category=None, match_any=True):
     filters = []
@@ -75,18 +131,27 @@ def search_transactions(engine, table_name, description=None, amount=None, categ
         result = conn.execute(text(query), params)
         rows = result.fetchall()
 
-    if rows:
+    return rows, result
+
+    #if rows:
+    #    df = pd.DataFrame(rows, columns=result.keys())
+    #    print("\nMatching transactions:")
+    #    print(df)
+    #else:
+    #    print("No matching transactions found :(")
+
+
+def show_transactions(engine, table_name, rows=None, result=None):
+    if not rows and not result:
+        df = pd.read_sql(table_name, engine)
+        print("\nAll Transactions:")
+        print(df)
+    elif result:
         df = pd.DataFrame(rows, columns=result.keys())
         print("\nMatching transactions:")
         print(df)
     else:
-        print("No matching transactions found :(")
-
-
-def show_transactions(engine, table_name):
-    df = pd.read_sql(table_name, engine)
-    print("\nAll Transactions:")
-    print(df)
+        print(f"The function show_transactions is not getting the proper inputs")
 
 def add_transaction(engine, table_name, description, amount, category):
     date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
