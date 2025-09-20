@@ -194,18 +194,42 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
           </form>
           <ul class=\"list-group list-group-flush mt-3\">
             {% for s in subs %}
-              <li class=\"list-group-item d-flex justify-content-between align-items-center\">
-                <div>
-                  <strong>{{ s.name }}</strong>
-                  <span class=\"ms-2 text-muted\">{{ s.category }}</span>
-                  <span class=\"ms-2\">{{ '%.2f'|format(s.amount or 0) }}</span>
-                  <span class=\"ms-2 text-muted\">on day {{ s.day_of_month }}</span>
-                  {% if not s.active %}<span class=\"badge text-bg-secondary ms-2\">inactive</span>{% endif %}
-                </div>
-                <form method=\"post\" action=\"{{ url_for('subs_toggle', name=s.name) }}\">
+              <li class=\"list-group-item\">
+                <form method=\"post\" action=\"{{ url_for('subs_update', rowid=s.rowid) }}\"> 
                   <input type=\"hidden\" name=\"_redirect_month\" value=\"{{ month }}\">
-                  <button class=\"btn btn-sm btn-outline-secondary\" type=\"submit\">Toggle</button>
+                  <div class=\"row g-2 align-items-center\">
+                    <div class=\"col-12 col-lg-3\">
+                      <input class=\"form-control form-control-sm\" name=\"name\" value=\"{{ s.name }}\" required>
+                    </div>
+                    <div class=\"col-12 col-lg-3\">
+                      <input class=\"form-control form-control-sm\" name=\"category\" value=\"{{ s.category }}\" required>
+                    </div>
+                    <div class=\"col-6 col-lg-2\">
+                      <input class=\"form-control form-control-sm\" name=\"amount\" type=\"number\" step=\"any\" value=\"{{ '%.2f'|format(((s.amount or 0)|abs)) }}\" required>
+                    </div>
+                    <div class=\"col-6 col-lg-2\">
+                      <input class=\"form-control form-control-sm\" name=\"day_of_month\" type=\"number\" min=\"1\" max=\"31\" value=\"{{ s.day_of_month }}\" required>
+                    </div>
+                    <div class=\"col-auto d-flex align-items-center gap-2\">
+                      <button class=\"btn btn-sm btn-primary\" type=\"submit\">Save</button>
+                      {% if s.active %}
+                        <span class=\"badge text-bg-success\">Active</span>
+                      {% else %}
+                        <span class=\"badge text-bg-secondary\">Inactive</span>
+                      {% endif %}
+                    </div>
+                  </div>
                 </form>
+                <div class=\"d-flex justify-content-end gap-2 mt-2\">
+                  <form method=\"post\" action=\"{{ url_for('subs_toggle', rowid=s.rowid) }}\">
+                    <input type=\"hidden\" name=\"_redirect_month\" value=\"{{ month }}\">
+                    <button class=\"btn btn-sm btn-outline-secondary\" type=\"submit\">Toggle</button>
+                  </form>
+                  <form method=\"post\" action=\"{{ url_for('subs_delete', rowid=s.rowid) }}\" onsubmit=\"return confirm('Delete this subscription?');\">
+                    <input type=\"hidden\" name=\"_redirect_month\" value=\"{{ month }}\">
+                    <button class=\"btn btn-sm btn-outline-danger\" type=\"submit\">Delete</button>
+                  </form>
+                </div>
               </li>
             {% else %}
               <li class=\"list-group-item\"><span class=\"muted\">No subscriptions yet</span></li>
@@ -427,7 +451,9 @@ renderPie('pie_sub', pieSub);
             targets = {"needs": float(trow[0]), "wants": float(trow[1]), "savings": float(trow[2])}
 
             # Subscriptions list
-            subs = conn.execute(text(f"SELECT name, category, amount, day_of_month, active FROM {TABLE_SUB} ORDER BY name")).mappings().all()
+            subs = conn.execute(
+                text(f"SELECT rowid, name, category, amount, day_of_month, active FROM {TABLE_SUB} ORDER BY name")
+            ).mappings().all()
 
         # Build meta totals (sum of spend magnitudes by mapped meta)
         meta_totals = {"Needs": 0.0, "Wants": 0.0, "Savings": 0.0, "Uncategorized": 0.0}
@@ -503,7 +529,16 @@ renderPie('pie_sub', pieSub);
         # Always treat user-entered positives as expenses
         amount = -abs(amount)
 
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now_dt = datetime.now()
+        if redirect_month:
+            try:
+                target_month = datetime.strptime(redirect_month, "%Y-%m")
+                last_day = calendar.monthrange(target_month.year, target_month.month)[1]
+                safe_day = min(now_dt.day, last_day)
+                now_dt = now_dt.replace(year=target_month.year, month=target_month.month, day=safe_day)
+            except ValueError:
+                pass
+        now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
         with engine.begin() as conn:
             conn.execute(
                 text(f"""
@@ -555,16 +590,69 @@ renderPie('pie_sub', pieSub);
         flash("Subscription added.")
         return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
 
-    @app.post("/subs/toggle/<path:name>")
-    def subs_toggle(name: str):
+    @app.post("/subs/update/<int:rowid>")
+    def subs_update(rowid: int):
+        name = (request.form.get("name") or "").strip()
+        category = (request.form.get("category") or "").strip()
+        amount_raw = (request.form.get("amount") or "").strip()
+        day_raw = (request.form.get("day_of_month") or "").strip()
+        redirect_month = (request.form.get("_redirect_month") or "").strip()
+
+        if not name or not category:
+            flash("Name and category are required for subscriptions.")
+            return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
+
+        try:
+            amount = float(amount_raw)
+            day = int(day_raw)
+            if not (1 <= day <= 31):
+                raise ValueError
+        except ValueError:
+            flash("Amount must be a number and day must be 1-31.")
+            return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
+
+        amount = -abs(amount)
+
+        with engine.begin() as conn:
+            result = conn.execute(text(f"""
+                UPDATE {TABLE_SUB}
+                SET name = :name,
+                    category = :category,
+                    amount = :amount,
+                    day_of_month = :day
+                WHERE rowid = :rowid
+            """), {"name": name, "category": category, "amount": amount, "day": day, "rowid": rowid})
+
+        if result.rowcount:
+            flash("Subscription updated.")
+        else:
+            flash("Subscription not found.")
+        return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
+
+    @app.post("/subs/toggle/<int:rowid>")
+    def subs_toggle(rowid: int):
         redirect_month = (request.form.get("_redirect_month") or "").strip()
         with engine.begin() as conn:
-            conn.execute(text(f"""
+            result = conn.execute(text(f"""
                 UPDATE {TABLE_SUB}
                 SET active = CASE WHEN active=1 THEN 0 ELSE 1 END
-                WHERE name = :name
-            """), {"name": name})
-        flash("Subscription toggled.")
+                WHERE rowid = :rowid
+            """), {"rowid": rowid})
+        if result.rowcount:
+            flash("Subscription toggled.")
+        else:
+            flash("Subscription not found.")
+        return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
+
+    @app.post("/subs/delete/<int:rowid>")
+    def subs_delete(rowid: int):
+        redirect_month = (request.form.get("_redirect_month") or "").strip()
+        with engine.begin() as conn:
+            result = conn.execute(text(f"DELETE FROM {TABLE_SUB} WHERE rowid = :rowid"), {"rowid": rowid})
+        if result.rowcount:
+            flash("Subscription deleted.")
+        else:
+            flash("Subscription not found.")
         return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
 
     def _apply_subscriptions_to_month(target_month: str):
@@ -740,6 +828,14 @@ class TransactionsWebAppTests(unittest.TestCase):
             ).first()
             return row[0] if row else None
 
+    def _get_subscription_rowid(self, name: str):
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(f"SELECT rowid FROM {self.sub_table} WHERE name = :n ORDER BY rowid DESC LIMIT 1"),
+                {"n": name},
+            ).first()
+            return row[0] if row else None
+
     # Core tests
     def test_add_transaction_success(self):
         resp = self.client.post(
@@ -883,6 +979,87 @@ class TransactionsWebAppTests(unittest.TestCase):
             amt = conn.execute(text(f"SELECT amount FROM {self.sub_table} WHERE name='Gym'"))\
                 .scalar()
         self.assertLess(amt, 0)
+
+    def test_subs_update_edits_subscription(self):
+        with self.engine.begin() as conn:
+            conn.execute(text(f"DELETE FROM {self.sub_table}"))
+        self.client.post(
+            "/subs/add",
+            data={"name": "Gym", "category": "Fitness", "amount": "20", "day_of_month": "3", "_redirect_month": "2099-07"},
+            follow_redirects=True,
+        )
+        rowid = self._get_subscription_rowid("Gym")
+        self.assertIsNotNone(rowid)
+        resp = self.client.post(
+            f"/subs/update/{rowid}",
+            data={
+                "name": "Gym Plus",
+                "category": "Health",
+                "amount": "30",
+                "day_of_month": "10",
+                "_redirect_month": "2099-07",
+            },
+            follow_redirects=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b"Subscription updated.", resp.data)
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(f"SELECT name, category, amount, day_of_month FROM {self.sub_table} WHERE rowid = :rowid"),
+                {"rowid": rowid},
+            ).mappings().first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["name"], "Gym Plus")
+        self.assertEqual(row["category"], "Health")
+        self.assertLess(row["amount"], 0)
+        self.assertEqual(row["day_of_month"], 10)
+
+    def test_subs_toggle_flips_active(self):
+        with self.engine.begin() as conn:
+            conn.execute(text(f"DELETE FROM {self.sub_table}"))
+        self.client.post(
+            "/subs/add",
+            data={"name": "Gym", "category": "Fitness", "amount": "20", "day_of_month": "3", "_redirect_month": "2099-07"},
+            follow_redirects=True,
+        )
+        rowid = self._get_subscription_rowid("Gym")
+        self.assertIsNotNone(rowid)
+        resp = self.client.post(
+            f"/subs/toggle/{rowid}",
+            data={"_redirect_month": "2099-07"},
+            follow_redirects=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        with self.engine.connect() as conn:
+            active = conn.execute(
+                text(f"SELECT active FROM {self.sub_table} WHERE rowid = :rowid"),
+                {"rowid": rowid},
+            ).scalar()
+        self.assertEqual(active, 0)
+
+    def test_subs_delete_removes_subscription(self):
+        with self.engine.begin() as conn:
+            conn.execute(text(f"DELETE FROM {self.sub_table}"))
+        self.client.post(
+            "/subs/add",
+            data={"name": "Gym", "category": "Fitness", "amount": "20", "day_of_month": "3", "_redirect_month": "2099-07"},
+            follow_redirects=True,
+        )
+        rowid = self._get_subscription_rowid("Gym")
+        self.assertIsNotNone(rowid)
+        resp = self.client.post(
+            f"/subs/delete/{rowid}",
+            data={"_redirect_month": "2099-07"},
+            follow_redirects=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b"Subscription deleted.", resp.data)
+        with self.engine.connect() as conn:
+            count = conn.execute(
+                text(f"SELECT COUNT(*) FROM {self.sub_table} WHERE rowid = :rowid"),
+                {"rowid": rowid},
+            ).scalar()
+        self.assertEqual(count, 0)
 
     def test_apply_normalizes_direct_db_positive_amounts(self):
         with self.engine.begin() as conn:
