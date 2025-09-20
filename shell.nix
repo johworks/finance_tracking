@@ -6,6 +6,7 @@ pkgs.mkShell {
     (pkgs.python3.withPackages(pypkgs: with pypkgs; [
       pandas
       sqlalchemy
+      flask
     ]))
   ];
 }

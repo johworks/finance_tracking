@@ -59,8 +59,6 @@ def main():
 
 def show_summary(engine, table_name):
 
-    print("Summary function -- REMOVE AFTER TESTING")
-
     # End goal: sum by total, category, date range
     # I want to first start by getting the total sum
 
