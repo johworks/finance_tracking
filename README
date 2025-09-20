@@ -24,9 +24,14 @@ Version 0.3:
     early on. It's not something that can be controlled by the user, it's hardcoded. I want these fields
     to be controlled by the web UI.
 
+Version 0.4:
+
+    Added a basic web portal for GUI management. Allows uses to add transactions with amount, category, and description
+    fields. It also allows users to delete transactions, and provides a sum per category.
+
 Planned features:
     [x] Search for specific transactions
     [x] Sum expenses (total, by category, date range)
-    [ ] Web portal for GUI management
+    [x] Web portal for GUI management
     [ ] Timed subscriptions
     [ ] Monthly report
