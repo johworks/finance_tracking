@@ -252,7 +252,7 @@
             // lib.mkIf cfg.openFirewall {
               networking.firewall.allowedTCPPorts = [ cfg.port ];
             }
-          );
+          )
         };
     };
 }
