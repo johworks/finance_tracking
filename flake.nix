@@ -201,16 +201,17 @@
                   }
                 ];
 
-                users.groups = lib.mkIf cfg.manageGroup { ${cfg.group} = {}; };
+                users.groups  = lib.mkIf cfg.manageGroup { "${cfg.group}" = {}; };
 
                 users.users = lib.mkIf cfg.manageUser {
-                  ${cfg.user} = {
+                  "${cfg.user}" = {
                     isSystemUser = true;
                     group = cfg.group;
                     home = cfg.dataDir;
                     createHome = true;
                   };
                 };
+
 
                 systemd.tmpfiles.rules = [
                   "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
