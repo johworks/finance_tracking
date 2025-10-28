@@ -11,18 +11,90 @@ If you prefer multiple physical files later (e.g., routes.py, models.py, tests.p
 
 from __future__ import annotations
 
-from flask import Flask, request, redirect, url_for, render_template_string, flash
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import StaticPool
-from datetime import datetime, date, timedelta
+import argparse
 import calendar
 import os
 import socket
 import sys
 import json
 import unittest
+from datetime import datetime, date, timedelta
+
+from flask import Flask, request, redirect, url_for, render_template_string, flash
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import StaticPool
 
 META_ALLOWED = ("Needs", "Wants", "Savings")
+
+
+def _normalized_month(value: str | None) -> str:
+    """Return a YYYY-MM string, defaulting to the current month."""
+
+    value = (value or "").strip()
+    if value:
+        try:
+            datetime.strptime(value, "%Y-%m")
+            return value
+        except ValueError:
+            pass
+    return date.today().strftime("%Y-%m")
+
+
+def apply_subscriptions(engine, table_tx: str, table_sub: str, target_month: str) -> None:
+    """Insert subscription transactions for the provided month using the given engine."""
+
+    target_month = _normalized_month(target_month)
+    y, m = map(int, target_month.split("-"))
+    last_day = calendar.monthrange(y, m)[1]
+    with engine.begin() as conn:
+        subs = (
+            conn.execute(
+                text(
+                    f"SELECT name, category, amount, day_of_month FROM {table_sub} WHERE active = 1"
+                )
+            )
+            .mappings()
+            .all()
+        )
+        for s in subs:
+            d = min(int(s["day_of_month"] or 1), last_day)
+            ts = f"{target_month}-{d:02d} 12:00:00"
+            desc = f"SUB: {s['name']}"
+            normalized_amt = -abs(float(s["amount"] or 0.0))
+            exists = conn.execute(
+                text(
+                    f"""
+                    SELECT 1 FROM {table_tx}
+                    WHERE date BETWEEN :start AND :end
+                      AND description = :desc
+                      AND category = :cat
+                      AND ABS(amount - :amt) < 1e-9
+                """
+                ),
+                {
+                    "start": f"{target_month}-{d:02d} 00:00:00",
+                    "end": f"{target_month}-{d:02d} 23:59:59",
+                    "desc": desc,
+                    "cat": s["category"],
+                    "amt": normalized_amt,
+                },
+            ).first()
+            if exists:
+                continue
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {table_tx} (date, description, amount, category)
+                    VALUES (:date, :description, :amount, :category)
+                """
+                ),
+                {
+                    "date": ts,
+                    "description": desc,
+                    "amount": normalized_amt,
+                    "category": s["category"],
+                },
+            )
 
 # -----------------------------
 # App factory (allows testing)
@@ -655,45 +727,6 @@ renderPie('pie_sub', pieSub);
             flash("Subscription not found.")
         return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
 
-    def _apply_subscriptions_to_month(target_month: str):
-        """Insert one transaction per ACTIVE subscription into the given YYYY-MM.
-        Idempotent per (name, category, amount, target_date).
-        Description is stored as "SUB: {name}".
-        """
-        y, m = map(int, target_month.split("-"))
-        last_day = calendar.monthrange(y, m)[1]
-        with engine.begin() as conn:
-            subs = conn.execute(text(f"SELECT name, category, amount, day_of_month FROM {TABLE_SUB} WHERE active = 1")).mappings().all()
-            for s in subs:
-                d = min(int(s["day_of_month"] or 1), last_day)
-                ts = f"{target_month}-{d:02d} 12:00:00"
-                desc = f"SUB: {s['name']}"
-                normalized_amt = -abs(float(s["amount"] or 0.0))
-                exists = conn.execute(text(f"""
-                    SELECT 1 FROM {TABLE_TX}
-                    WHERE date BETWEEN :start AND :end
-                      AND description = :desc
-                      AND category = :cat
-                      AND ABS(amount - :amt) < 1e-9
-                """), {
-                    "start": f"{target_month}-{d:02d} 00:00:00",
-                    "end": f"{target_month}-{d:02d} 23:59:59",
-                    "desc": desc,
-                    "cat": s["category"],
-                    "amt": normalized_amt,
-                }).first()
-                if exists:
-                    continue
-                conn.execute(text(f"""
-                    INSERT INTO {TABLE_TX} (date, description, amount, category)
-                    VALUES (:date, :description, :amount, :category)
-                """), {
-                    "date": ts,
-                    "description": desc,
-                    "amount": normalized_amt,
-                    "category": s["category"],
-                })
-
     @app.post("/subs/apply")
     def subs_apply():
         target_month = (request.form.get("month") or "").strip() or date.today().strftime("%Y-%m")
@@ -701,7 +734,7 @@ renderPie('pie_sub', pieSub);
             datetime.strptime(target_month, "%Y-%m")
         except ValueError:
             target_month = date.today().strftime("%Y-%m")
-        _apply_subscriptions_to_month(target_month)
+        apply_subscriptions(engine, TABLE_TX, TABLE_SUB, target_month)
         flash(f"Subscriptions applied to {target_month}.")
         return redirect(url_for("index", month=target_month))
 
@@ -787,18 +820,73 @@ def _find_free_port() -> int:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
-if __name__ == "__main__":
-    app = create_app()
-    host = os.environ.get("HOST", "127.0.0.1")
-    port = _find_free_port()
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Finance tracking web application helper.")
+    parser.add_argument(
+        "--database",
+        help="SQLAlchemy database URL to use (defaults to the bundled sqlite file).",
+    )
+    parser.add_argument(
+        "--host",
+        help="Host interface for the development server. Defaults to HOST env var or 127.0.0.1.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        help="Port for the development server. Defaults to PORT env var or an ephemeral port.",
+    )
+    parser.add_argument(
+        "--apply-subscriptions",
+        action="store_true",
+        help="Apply active subscriptions to the given (or current) month and exit.",
+    )
+    parser.add_argument(
+        "--month",
+        help="Target month in YYYY-MM format when applying subscriptions. Defaults to the current month.",
+    )
+
+    args = parser.parse_args(argv)
+    app = create_app(db_url=args.database)
+
+    if args.apply_subscriptions:
+        month = _normalized_month(args.month)
+        apply_subscriptions(
+            app.config["_ENGINE"],
+            app.config["_TABLE_TX"],
+            app.config["_TABLE_SUB"],
+            month,
+        )
+        print(f"Subscriptions applied to {month}.")
+        return
+
+    host = args.host or os.environ.get("HOST", "127.0.0.1")
+    port = args.port
+    if port is None:
+        env_port = os.environ.get("PORT")
+        if env_port:
+            try:
+                parsed_port = int(env_port)
+                if 0 <= parsed_port <= 65535:
+                    port = parsed_port
+            except ValueError:
+                port = None
+        if port is None:
+            port = _find_free_port()
+
     try:
         print(f"Starting server on http://{host}:{port}")
         app.run(host=host, port=port, debug=False, use_reloader=False, threaded=False)
     except SystemExit:
-        print("\n[!] Server failed to start (SystemExit). This environment may block sockets or the port is unavailable.")
+        print(
+            "\n[!] Server failed to start (SystemExit). This environment may block sockets or the port is unavailable."
+        )
         print("    - Try setting a custom port: PORT=5000 python transactions_web_app_full.py")
         print("    - Or run the test suite: python -m unittest -v transactions_web_app_full")
         sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
 
 
 # -----------------------------
