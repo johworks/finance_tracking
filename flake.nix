@@ -192,7 +192,7 @@
                   ${lib.optionalString (cfg.timer.month != null) "--month ${lib.escapeShellArg cfg.timer.month}"}
               '';
               timerEnv = serviceEnv // cfg.timer.environment;
-            in (
+            in
               {
                 assertions = [
                   {
@@ -201,58 +201,58 @@
                   }
                 ];
 
-              users.groups = lib.mkIf cfg.manageGroup { ${cfg.group} = {}; };
+                users.groups = lib.mkIf cfg.manageGroup { ${cfg.group} = {}; };
 
-              users.users = lib.mkIf cfg.manageUser {
-                ${cfg.user} = {
-                  isSystemUser = true;
-                  group = cfg.group;
-                  home = cfg.dataDir;
-                  createHome = true;
+                users.users = lib.mkIf cfg.manageUser {
+                  ${cfg.user} = {
+                    isSystemUser = true;
+                    group = cfg.group;
+                    home = cfg.dataDir;
+                    createHome = true;
+                  };
                 };
-              };
 
-              systemd.tmpfiles.rules = [
-                "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
-              ];
+                systemd.tmpfiles.rules = [
+                  "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
+                ];
 
-              systemd.services.finance-tracking = {
-                description = "Finance tracking web service";
-                after = [ "network.target" ];
-                wantedBy = [ "multi-user.target" ];
-                serviceConfig = {
-                  ExecStart = startScript;
-                  WorkingDirectory = cfg.dataDir;
-                  User = cfg.user;
-                  Group = cfg.group;
-                  Restart = "on-failure";
-                  RestartSec = 5;
-                } // cfg.serviceConfig;
-                environment = serviceEnv;
-              };
+                systemd.services.finance-tracking = {
+                  description = "Finance tracking web service";
+                  after = [ "network.target" ];
+                  wantedBy = [ "multi-user.target" ];
+                  serviceConfig = {
+                    ExecStart = startScript;
+                    WorkingDirectory = cfg.dataDir;
+                    User = cfg.user;
+                    Group = cfg.group;
+                    Restart = "on-failure";
+                    RestartSec = 5;
+                  } // cfg.serviceConfig;
+                  environment = serviceEnv;
+                };
 
-              systemd.services."finance-tracking-apply" = lib.mkIf cfg.timer.enable {
-                description = "Apply finance tracking subscriptions";
-                serviceConfig = {
-                  Type = "oneshot";
-                  ExecStart = applyScript;
-                  WorkingDirectory = cfg.dataDir;
-                  User = cfg.user;
-                  Group = cfg.group;
-                } // cfg.timer.serviceConfig;
-                environment = timerEnv;
-              };
+                systemd.services."finance-tracking-apply" = lib.mkIf cfg.timer.enable {
+                  description = "Apply finance tracking subscriptions";
+                  serviceConfig = {
+                    Type = "oneshot";
+                    ExecStart = applyScript;
+                    WorkingDirectory = cfg.dataDir;
+                    User = cfg.user;
+                    Group = cfg.group;
+                  } // cfg.timer.serviceConfig;
+                  environment = timerEnv;
+                };
 
-              systemd.timers."finance-tracking-apply" = lib.mkIf cfg.timer.enable {
-                description = cfg.timer.description;
-                wantedBy = cfg.timer.wantedBy;
-                timerConfig = cfg.timer.timerConfig;
-              };
+                systemd.timers."finance-tracking-apply" = lib.mkIf cfg.timer.enable {
+                  description = cfg.timer.description;
+                  wantedBy = cfg.timer.wantedBy;
+                  timerConfig = cfg.timer.timerConfig;
+                };
             }
             // lib.mkIf cfg.openFirewall {
               networking.firewall.allowedTCPPorts = [ cfg.port ];
             }
-          )
+          );
         };
     };
 }
