@@ -1,3 +1,5 @@
+# Finance Tracking
+
 I want to create a simple finance management application that I can use to do a few things:
 
     - Visualize my finanaces
@@ -29,9 +31,92 @@ Version 0.4:
     Added a basic web portal for GUI management. Allows uses to add transactions with amount, category, and description
     fields. It also allows users to delete transactions, and provides a sum per category.
 
+Version 0.5:
+
+    Added a Nix flake that packages the web application, exposes a NixOS module with a configurable systemd service and timer,
+    and provides a CLI flag for applying subscriptions without starting the server.
+
 Planned features:
     [x] Search for specific transactions
     [x] Sum expenses (total, by category, date range)
     [x] Web portal for GUI management
     [ ] Timed subscriptions
     [ ] Monthly report
+
+## Running the app with Nix
+
+This repository ships with a `flake.nix` that packages the Flask server, provides a reproducible development shell, and exposes a
+NixOS module for running the service under systemd.
+
+### Quick start
+
+* Development shell: `nix develop`
+* Run the server locally: `nix run`
+  * Use CLI switches to override defaults, e.g. `nix run . -- --host 0.0.0.0 --port 8080 --database sqlite:///my.db`
+* Add the overlay: `outputs.overlays.default` exposes the `finance-tracking` package.
+
+### CLI options
+
+The packaged command accepts the following flags:
+
+* `--database`: SQLAlchemy database URL (defaults to `sqlite:///transactions.db` inside the working directory).
+* `--host`: Interface to bind when starting the development server (defaults to `HOST` environment variable or `127.0.0.1`).
+* `--port`: Port to listen on (defaults to `PORT` environment variable or an ephemeral port).
+* `--apply-subscriptions`: Apply all active subscriptions for the chosen month and exit.
+* `--month`: Target `YYYY-MM` when using `--apply-subscriptions` (defaults to the current month).
+
+### NixOS module
+
+Enable and configure the service in your `configuration.nix`:
+
+```nix
+{
+  imports = [ inputs.finance-tracking.nixosModules.finance-tracking ];
+
+  services.financeTracking = {
+    enable = true;
+    openFirewall = true;
+    host = "0.0.0.0";
+    port = 8080;
+  };
+}
+```
+
+#### Service configuration
+
+All available options:
+
+* `services.financeTracking.enable` (bool, default `false`): turn the module on.
+* `services.financeTracking.package` (package, default `finance-tracking` from this flake): override the program to run.
+* `services.financeTracking.user` / `group` (strings, defaults `finance-tracking`): account used by the service.
+* `services.financeTracking.manageUser` / `manageGroup` (bools, defaults `true`): create the user/group automatically.
+* `services.financeTracking.dataDir` (string path, default `/var/lib/finance-tracking`): working directory that stores the SQLite database.
+* `services.financeTracking.databaseUrl` (null or string, default `sqlite:///.../transactions.db`): custom SQLAlchemy URL.
+* `services.financeTracking.host` (string, default `127.0.0.1`): interface passed to the server.
+* `services.financeTracking.port` (unsigned int, default `5000`): port passed to the server and optionally opened in the firewall.
+* `services.financeTracking.environment` (attrset of strings, default `{}`): extra environment variables for the service.
+* `services.financeTracking.serviceConfig` (attrset, default `{}`): extra `systemd.service` settings merged into the unit.
+* `services.financeTracking.openFirewall` (bool, default `false`): open the TCP port in the firewall automatically.
+
+#### Subscription timer
+
+Enable a recurring task that applies active subscriptions via the CLI without starting the web server:
+
+```nix
+services.financeTracking.timer = {
+  enable = true;
+  timerConfig.OnCalendar = "daily";   # default schedule
+};
+```
+
+Timer-related options:
+
+* `services.financeTracking.timer.enable` (bool, default `false`): create the oneshot service and timer.
+* `services.financeTracking.timer.description` (string, default `"Apply finance tracking subscriptions"`): description shown by systemd.
+* `services.financeTracking.timer.month` (null or string, default `null`): optional fixed `YYYY-MM` passed to the CLI; `null` means "current month".
+* `services.financeTracking.timer.timerConfig` (attrset of strings/bools/ints, default `{ OnCalendar = "daily"; Persistent = true; }`): raw `systemd.timer` settings.
+* `services.financeTracking.timer.environment` (attrset of strings, default `{}`): additional environment variables for the timer service.
+* `services.financeTracking.timer.serviceConfig` (attrset, default `{}`): extra options merged into the timer's oneshot service.
+* `services.financeTracking.timer.wantedBy` (list of strings, default `["timers.target"]`): additional targets for the timer.
+
+When enabled, the timer invokes `finance-tracking --apply-subscriptions` with the configured database URL and working directory so that recurring entries are added without keeping the HTTP server running.
