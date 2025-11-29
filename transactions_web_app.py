@@ -282,11 +282,12 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
         <div class=\"card-body\">
           <div class=\"d-flex justify-content-between align-items-center\">
             <div>
-              <div class=\"text-muted small\">Net for {{ month }}</div>
-              <div class=\"fs-4 fw-semibold\">{{ '%.2f'|format(month_total) }}</div>
+              <div class=\"text-muted small\">Net after expenses ({{ month }})</div>
+              <div class=\"fs-4 fw-semibold\">{{ '%.2f'|format(net_after_expenses) }}</div>
             </div>
-            <span class=\"badge text-bg-{{ 'success' if month_total >=0 else 'danger' }}\">Overall</span>
+            <span class=\"badge text-bg-{{ 'success' if net_after_expenses >=0 else 'danger' }}\">Overall</span>
           </div>
+          <div class=\"text-muted small mt-1\">Payroll net {{ '%.2f'|format(payroll_summary.net) }} + transactions {{ '%.2f'|format(month_total) }}</div>
         </div>
       </div>
     </div>
@@ -408,9 +409,54 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
                   <td>{{ '%.2f'|format(p.other or 0) }}</td>
                   <td class=\"fw-semibold\">{{ '%.2f'|format(p.net) }}</td>
                   <td class=\"text-end\">
-                    <form method=\"post\" action=\"{{ url_for('payroll_delete', rowid=p.id) }}\">
+                    <div class=\"btn-group btn-group-sm\" role=\"group\">
+                      <button class=\"btn btn-outline-secondary\" type=\"button\" data-bs-toggle=\"collapse\" data-bs-target=\"#payroll-edit-{{ p.id }}\">Edit</button>
+                      <form method=\"post\" action=\"{{ url_for('payroll_delete', rowid=p.id) }}\">
+                        <input type=\"hidden\" name=\"_redirect_month\" value=\"{{ month }}\">
+                        <button class=\"btn btn-outline-danger\" type=\"submit\">Delete</button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>
+                <tr class=\"collapse\" id=\"payroll-edit-{{ p.id }}\">
+                  <td colspan=\"9\">
+                    <form class=\"row g-2\" method=\"post\" action=\"{{ url_for('payroll_edit', rowid=p.id) }}\">
                       <input type=\"hidden\" name=\"_redirect_month\" value=\"{{ month }}\">
-                      <button class=\"btn btn-sm btn-outline-danger\" type=\"submit\">Delete</button>
+                      <div class=\"col-6 col-md-3\">
+                        <label class=\"form-label\">Pay date</label>
+                        <input class=\"form-control form-control-sm\" type=\"date\" name=\"pay_date\" value=\"{{ p.pay_date }}\" required>
+                      </div>
+                      <div class=\"col-6 col-md-3\">
+                        <label class=\"form-label\">Gross</label>
+                        <input class=\"form-control form-control-sm\" type=\"text\" inputmode=\"decimal\" name=\"gross\" value=\"{{ '%.2f'|format(p.gross or 0) }}\">
+                      </div>
+                      <div class=\"col-6 col-md-3\">
+                        <label class=\"form-label\">Tax</label>
+                        <input class=\"form-control form-control-sm\" type=\"text\" inputmode=\"decimal\" name=\"tax\" value=\"{{ '%.2f'|format(p.tax or 0) }}\">
+                      </div>
+                      <div class=\"col-6 col-md-3\">
+                        <label class=\"form-label\">401k</label>
+                        <input class=\"form-control form-control-sm\" type=\"text\" inputmode=\"decimal\" name=\"k401\" value=\"{{ '%.2f'|format(p.k401 or 0) }}\">
+                      </div>
+                      <div class=\"col-6 col-md-3\">
+                        <label class=\"form-label\">HSA</label>
+                        <input class=\"form-control form-control-sm\" type=\"text\" inputmode=\"decimal\" name=\"hsa\" value=\"{{ '%.2f'|format(p.hsa or 0) }}\">
+                      </div>
+                      <div class=\"col-6 col-md-3\">
+                        <label class=\"form-label\">ESPP</label>
+                        <input class=\"form-control form-control-sm\" type=\"text\" inputmode=\"decimal\" name=\"espp\" value=\"{{ '%.2f'|format(p.espp or 0) }}\">
+                      </div>
+                      <div class=\"col-6 col-md-3\">
+                        <label class=\"form-label\">Other</label>
+                        <input class=\"form-control form-control-sm\" type=\"text\" inputmode=\"decimal\" name=\"other\" value=\"{{ '%.2f'|format(p.other or 0) }}\">
+                      </div>
+                      <div class=\"col-6 col-md-3\">
+                        <label class=\"form-label\">Notes</label>
+                        <input class=\"form-control form-control-sm\" type=\"text\" name=\"notes\" value=\"{{ p.notes }}\">
+                      </div>
+                      <div class=\"col-12 d-flex justify-content-end\">
+                        <button class=\"btn btn-sm btn-primary\" type=\"submit\">Save</button>
+                      </div>
                     </form>
                   </td>
                 </tr>
@@ -790,6 +836,7 @@ renderPie('pie_sub', pieSub);
   })
 })()
 </script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
 """
@@ -1503,6 +1550,7 @@ renderPie('pie_sub', pieSub);
 
         # Overall month total (net)
         month_total = sum([float(r["total_amount"] or 0) for r in totals_by_cat])
+        net_after_expenses = payroll_summary["net"] + month_total
 
         # Bucket summaries
         bucket_filling = _enrich_bucket_rows(bucket_filling_rows, mappings)
@@ -1535,6 +1583,7 @@ renderPie('pie_sub', pieSub);
             meta_allowed=META_ALLOWED,
             payroll_rows=payroll_rows,
             payroll_summary=payroll_summary,
+            net_after_expenses=net_after_expenses,
             bucket_filling=bucket_filling,
             bucket_ready=bucket_ready,
             bucket_recent=bucket_recent,
@@ -1782,6 +1831,44 @@ renderPie('pie_sub', pieSub);
                 VALUES (:pay_date, :gross, :tax, :k401, :hsa, :espp, :other, :notes)
             """), {"pay_date": pay_date, "gross": gross, "tax": tax, "k401": k401, "hsa": hsa, "espp": espp, "other": other, "notes": notes})
         flash("Payroll entry added.")
+        return redirect(url_for("index", month=month) if month else url_for("index"))
+
+    @app.post("/payroll/edit/<int:rowid>")
+    def payroll_edit(rowid: int):
+        pay_date = (request.form.get("pay_date") or "").strip()
+        gross_raw = (request.form.get("gross") or "0").strip()
+        tax_raw = (request.form.get("tax") or "0").strip()
+        k401_raw = (request.form.get("k401") or "0").strip()
+        hsa_raw = (request.form.get("hsa") or "0").strip()
+        espp_raw = (request.form.get("espp") or "0").strip()
+        other_raw = (request.form.get("other") or "0").strip()
+        notes = (request.form.get("notes") or "").strip()
+        month = (request.form.get("_redirect_month") or "").strip()
+        try:
+            datetime.strptime(pay_date, "%Y-%m-%d")
+            gross = _parse_sum_field(gross_raw)
+            tax = _parse_sum_field(tax_raw)
+            k401 = _parse_sum_field(k401_raw)
+            hsa = _parse_sum_field(hsa_raw)
+            espp = _parse_sum_field(espp_raw)
+            other = _parse_sum_field(other_raw)
+        except ValueError:
+            flash("Please provide a valid pay date and numeric amounts.")
+            return redirect(url_for("index", month=month) if month else url_for("index"))
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+                UPDATE {TABLE_PAYROLL}
+                SET pay_date = :pay_date,
+                    gross = :gross,
+                    tax = :tax,
+                    k401 = :k401,
+                    hsa = :hsa,
+                    espp = :espp,
+                    other = :other,
+                    notes = :notes
+                WHERE id = :id
+            """), {"pay_date": pay_date, "gross": gross, "tax": tax, "k401": k401, "hsa": hsa, "espp": espp, "other": other, "notes": notes, "id": rowid})
+        flash("Payroll entry updated.")
         return redirect(url_for("index", month=month) if month else url_for("index"))
 
     @app.post("/payroll/delete/<int:rowid>")
