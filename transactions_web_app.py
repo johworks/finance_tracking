@@ -216,6 +216,18 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
         next_m = (date(y, m, 15) + timedelta(days=31)).strftime("%Y-%m")
         return prev_m, next_m
 
+    def _parse_sum_field(raw: str | None) -> float:
+        """Allow inputs like '14.27+4.28+17.02' by summing numeric tokens."""
+        text_val = (raw or "").strip()
+        if not text_val:
+            return 0.0
+        # Remove spaces to keep UI flexible
+        tokens = [t for t in text_val.replace(" ", "").split("+") if t]
+        total = 0.0
+        for tok in tokens:
+            total += float(tok)
+        return total
+
     PAGE_TEMPLATE = """
 <!doctype html>
 <html lang=\"en\">
@@ -329,27 +341,27 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
             </div>
             <div class=\"col-6\">
               <label class=\"form-label\">Gross</label>
-              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"gross\" placeholder=\"0.00\">
+              <input class=\"form-control\" type=\"text\" inputmode=\"decimal\" name=\"gross\" placeholder=\"0.00 or 1500+250\">
             </div>
             <div class=\"col-6\">
               <label class=\"form-label\">Tax withheld</label>
-              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"tax\" placeholder=\"0.00\">
+              <input class=\"form-control\" type=\"text\" inputmode=\"decimal\" name=\"tax\" placeholder=\"0.00 or 200+50\">
             </div>
             <div class=\"col-6\">
               <label class=\"form-label\">401k pre-tax</label>
-              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"k401\" placeholder=\"0.00\">
+              <input class=\"form-control\" type=\"text\" inputmode=\"decimal\" name=\"k401\" placeholder=\"0.00 or 100+75\">
             </div>
             <div class=\"col-6\">
               <label class=\"form-label\">HSA</label>
-              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"hsa\" placeholder=\"0.00\">
+              <input class=\"form-control\" type=\"text\" inputmode=\"decimal\" name=\"hsa\" placeholder=\"0.00 or 25+25\">
             </div>
             <div class=\"col-6\">
               <label class=\"form-label\">ESPP</label>
-              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"espp\" placeholder=\"0.00\">
+              <input class=\"form-control\" type=\"text\" inputmode=\"decimal\" name=\"espp\" placeholder=\"0.00\">
             </div>
             <div class=\"col-6\">
               <label class=\"form-label\">Other deductions</label>
-              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"other\" placeholder=\"0.00\">
+              <input class=\"form-control\" type=\"text\" inputmode=\"decimal\" name=\"other\" placeholder=\"0.00 or 14.27+4.28\">
             </div>
             <div class=\"col-12\">
               <label class=\"form-label\">Notes</label>
@@ -1755,12 +1767,12 @@ renderPie('pie_sub', pieSub);
         month = (request.form.get("_redirect_month") or "").strip()
         try:
             datetime.strptime(pay_date, "%Y-%m-%d")
-            gross = float(gross_raw or 0)
-            tax = float(tax_raw or 0)
-            k401 = float(k401_raw or 0)
-            hsa = float(hsa_raw or 0)
-            espp = float(espp_raw or 0)
-            other = float(other_raw or 0)
+            gross = _parse_sum_field(gross_raw)
+            tax = _parse_sum_field(tax_raw)
+            k401 = _parse_sum_field(k401_raw)
+            hsa = _parse_sum_field(hsa_raw)
+            espp = _parse_sum_field(espp_raw)
+            other = _parse_sum_field(other_raw)
         except ValueError:
             flash("Please provide a valid pay date and numeric amounts.")
             return redirect(url_for("index", month=month) if month else url_for("index"))
