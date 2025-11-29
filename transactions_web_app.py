@@ -117,6 +117,7 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
     TABLE_INCOME = "monthly_income"          # month -> income
     TABLE_TARGETS = "meta_targets"           # single-row needs/wants/savings %
     TABLE_BUCKETS = "funding_buckets"
+    TABLE_PAYROLL = "payroll_entries"
 
     # Create tables
     with engine.begin() as conn:
@@ -161,11 +162,31 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
             CREATE TABLE IF NOT EXISTS {TABLE_BUCKETS} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
+                category TEXT,
                 goal REAL NOT NULL,
                 current REAL NOT NULL DEFAULT 0,
                 status TEXT CHECK(status IN ('filling','ready','spent','archived')) NOT NULL DEFAULT 'filling',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        # lightweight migration for legacy buckets table to add category
+        cols = [row[1] for row in conn.execute(text(f"PRAGMA table_info({TABLE_BUCKETS})")).fetchall()]
+        if "category" not in cols:
+            conn.execute(text(f"ALTER TABLE {TABLE_BUCKETS} ADD COLUMN category TEXT"))
+
+        conn.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_PAYROLL} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pay_date TEXT NOT NULL,
+                gross REAL DEFAULT 0,
+                tax REAL DEFAULT 0,
+                k401 REAL DEFAULT 0,
+                hsa REAL DEFAULT 0,
+                espp REAL DEFAULT 0,
+                other REAL DEFAULT 0,
+                notes TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """))
         exists = conn.execute(text(f"SELECT 1 FROM {TABLE_TARGETS} WHERE id=1")).first()
@@ -201,7 +222,7 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
 <head>
   <meta charset=\"utf-8\">
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-  <title>Transactions</title>
+  <title>Transactions & Funding Buckets</title>
   <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>
   <link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css\" rel=\"stylesheet\">
   <script src=\"https://cdn.jsdelivr.net/npm/chart.js\"></script>
@@ -216,9 +237,17 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
 </head>
 <body>
 <div class=\"container\">
-  <div class=\"d-flex justify-content-between align-items-center mb-3\">
-    <h1 class=\"mb-0\">Transactions</h1>
-    <a class=\"btn btn-outline-secondary\" href=\"{{ url_for('buckets_index') }}\">Funding Buckets</a>
+  <div class=\"d-flex flex-wrap justify-content-between align-items-start mb-3 gap-2\">
+    <div>
+      <h1 class=\"mb-1\">Your Finances</h1>
+      <div class=\"text-muted\">Spending, budgeting, and buckets in one place.</div>
+    </div>
+    <div class=\"btn-group\" role=\"group\">
+      <a class=\"btn btn-outline-primary\" href=\"#payroll\">Bi-weekly payroll</a>
+      <a class=\"btn btn-outline-primary\" href=\"#spend\">Transactions</a>
+      <a class=\"btn btn-outline-primary\" href=\"#buckets\">Buckets</a>
+      <a class=\"btn btn-outline-secondary\" href=\"{{ url_for('buckets_index') }}\">Buckets page</a>
+    </div>
   </div>
 
   <form class=\"d-flex align-items-center gap-2 mb-4\" method=\"get\" action=\"/\">
@@ -235,8 +264,158 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
     {% endif %}
   {% endwith %}
 
+  <div class=\"row g-3 mb-3\">
+    <div class=\"col-12 col-lg-4\">
+      <div class=\"card shadow-sm h-100\">
+        <div class=\"card-body\">
+          <div class=\"d-flex justify-content-between align-items-center\">
+            <div>
+              <div class=\"text-muted small\">Net for {{ month }}</div>
+              <div class=\"fs-4 fw-semibold\">{{ '%.2f'|format(month_total) }}</div>
+            </div>
+            <span class=\"badge text-bg-{{ 'success' if month_total >=0 else 'danger' }}\">Overall</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class=\"col-12 col-lg-4\">
+      <div class=\"card shadow-sm h-100\">
+        <div class=\"card-body\">
+          <div class=\"text-muted small\">Active buckets</div>
+          <div class=\"d-flex justify-content-between align-items-center\">
+            <div>
+              <div class=\"fs-5 fw-semibold\">{{ '%.2f'|format(bucket_totals.current) }} / {{ '%.2f'|format(bucket_totals.goal) }}</div>
+              <div class=\"text-muted small\">{{ bucket_totals.ready_count }} ready · {{ bucket_totals.filling_count }} filling</div>
+            </div>
+            <div class=\"progress\" style=\"width:120px; height: 8px;\">
+              <div class=\"progress-bar\" role=\"progressbar\" style=\"width: {{ bucket_totals.progress_pct }}%;\"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class=\"col-12 col-lg-4\">
+      <div class=\"card shadow-sm h-100\">
+        <div class=\"card-body\">
+          <div class=\"text-muted small\">Needs/Wants/Savings targets</div>
+          <div class=\"d-flex gap-2 flex-wrap\">
+            <span class=\"badge text-bg-primary\">Needs {{ targets.needs }}%</span>
+            <span class=\"badge text-bg-warning text-dark\">Wants {{ targets.wants }}%</span>
+            <span class=\"badge text-bg-success\">Savings {{ targets.savings }}%</span>
+          </div>
+          {% if income is not none %}
+            <div class=\"text-muted small mt-1\">Income set: {{ '%.2f'|format(income) }}</div>
+          {% else %}
+            <div class=\"text-muted small mt-1\">No income set for {{ month }}.</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class=\"card shadow-sm mb-4\" id=\"payroll\">
+    <div class=\"card-body\">
+      <div class=\"d-flex justify-content-between align-items-center mb-2\">
+        <h5 class=\"card-title mb-0\">Bi-weekly payroll</h5>
+        <div class=\"text-muted small\">Enter each pay stub; monthly goals stay aligned with income & targets.</div>
+      </div>
+      <div class=\"row g-3\">
+        <div class=\"col-12 col-xl-5\">
+          <form class=\"row g-2\" method=\"post\" action=\"{{ url_for('payroll_add') }}\">
+            <input type=\"hidden\" name=\"_redirect_month\" value=\"{{ month }}\">
+            <div class=\"col-12\">
+              <label class=\"form-label\">Pay date</label>
+              <input class=\"form-control\" type=\"date\" name=\"pay_date\" value=\"{{ month }}-01\" required>
+            </div>
+            <div class=\"col-6\">
+              <label class=\"form-label\">Gross</label>
+              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"gross\" placeholder=\"0.00\">
+            </div>
+            <div class=\"col-6\">
+              <label class=\"form-label\">Tax withheld</label>
+              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"tax\" placeholder=\"0.00\">
+            </div>
+            <div class=\"col-6\">
+              <label class=\"form-label\">401k pre-tax</label>
+              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"k401\" placeholder=\"0.00\">
+            </div>
+            <div class=\"col-6\">
+              <label class=\"form-label\">HSA</label>
+              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"hsa\" placeholder=\"0.00\">
+            </div>
+            <div class=\"col-6\">
+              <label class=\"form-label\">ESPP</label>
+              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"espp\" placeholder=\"0.00\">
+            </div>
+            <div class=\"col-6\">
+              <label class=\"form-label\">Other deductions</label>
+              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"other\" placeholder=\"0.00\">
+            </div>
+            <div class=\"col-12\">
+              <label class=\"form-label\">Notes</label>
+              <input class=\"form-control\" type=\"text\" name=\"notes\" placeholder=\"e.g., Bonus, reimbursement\">
+            </div>
+            <div class=\"col-12 d-flex justify-content-end\">
+              <button class=\"btn btn-primary\" type=\"submit\">Add payroll entry</button>
+            </div>
+          </form>
+        </div>
+        <div class=\"col-12 col-xl-7\">
+          <div class=\"row g-2 mb-2\">
+            <div class=\"col-6 col-md-4\">
+              <div class=\"p-2 border rounded small\">Gross: <strong>{{ '%.2f'|format(payroll_summary.gross) }}</strong></div>
+            </div>
+            <div class=\"col-6 col-md-4\">
+              <div class=\"p-2 border rounded small\">Net: <strong>{{ '%.2f'|format(payroll_summary.net) }}</strong></div>
+            </div>
+            <div class=\"col-6 col-md-4\">
+              <div class=\"p-2 border rounded small\">401k: <strong>{{ '%.2f'|format(payroll_summary.k401) }}</strong></div>
+            </div>
+            <div class=\"col-6 col-md-4\">
+              <div class=\"p-2 border rounded small\">HSA: <strong>{{ '%.2f'|format(payroll_summary.hsa) }}</strong></div>
+            </div>
+            <div class=\"col-6 col-md-4\">
+              <div class=\"p-2 border rounded small\">ESPP: <strong>{{ '%.2f'|format(payroll_summary.espp) }}</strong></div>
+            </div>
+            <div class=\"col-6 col-md-4\">
+              <div class=\"p-2 border rounded small\">Tax: <strong>{{ '%.2f'|format(payroll_summary.tax) }}</strong></div>
+            </div>
+          </div>
+          <div class=\"table-responsive\">
+            <table class=\"table table-sm align-middle\">
+              <thead><tr><th>Date</th><th>Gross</th><th>Tax</th><th>401k</th><th>HSA</th><th>ESPP</th><th>Other</th><th>Net</th><th></th></tr></thead>
+              <tbody>
+              {% for p in payroll_rows %}
+                <tr>
+                  <td class=\"text-nowrap\">{{ p.pay_date }}</td>
+                  <td>{{ '%.2f'|format(p.gross or 0) }}</td>
+                  <td>{{ '%.2f'|format(p.tax or 0) }}</td>
+                  <td>{{ '%.2f'|format(p.k401 or 0) }}</td>
+                  <td>{{ '%.2f'|format(p.hsa or 0) }}</td>
+                  <td>{{ '%.2f'|format(p.espp or 0) }}</td>
+                  <td>{{ '%.2f'|format(p.other or 0) }}</td>
+                  <td class=\"fw-semibold\">{{ '%.2f'|format(p.net) }}</td>
+                  <td class=\"text-end\">
+                    <form method=\"post\" action=\"{{ url_for('payroll_delete', rowid=p.id) }}\">
+                      <input type=\"hidden\" name=\"_redirect_month\" value=\"{{ month }}\">
+                      <button class=\"btn btn-sm btn-outline-danger\" type=\"submit\">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              {% else %}
+                <tr><td colspan=\"9\" class=\"text-muted\">No payroll entries for this month.</td></tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class=\"text-muted small\">Net = gross - tax - 401k - HSA - ESPP - other.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class=\"row g-4\">
-    <div class=\"col-12 col-xxl-4\">
+    <div class=\"col-12 col-xxl-4\" id=\"spend\">
       <div class=\"card shadow-sm\">
         <div class=\"card-body\">
           <h5 class=\"card-title\">Add transaction</h5>
@@ -405,6 +584,115 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
     </div>
 
     <div class=\"col-12 col-xxl-8\">
+      <div class=\"card shadow-sm mb-4\" id=\"buckets\">
+        <div class=\"card-body\">
+          <div class=\"d-flex justify-content-between align-items-center mb-2\">
+            <h5 class=\"card-title mb-0\">Funding Buckets</h5>
+            <a class=\"btn btn-sm btn-outline-secondary\" href=\"{{ url_for('buckets_index') }}\">Open full view</a>
+          </div>
+          <form class=\"row row-cols-1 row-cols-lg-5 g-2 mb-3\" method=\"post\" action=\"{{ url_for('buckets_add') }}\">
+            <input type=\"hidden\" name=\"_redirect\" value=\"index\">
+            <input type=\"hidden\" name=\"_redirect_month\" value=\"{{ month }}\">
+            <div class=\"col\">
+              <input class=\"form-control form-control-sm\" name=\"name\" placeholder=\"Name\" required>
+            </div>
+            <div class=\"col\">
+              <input class=\"form-control form-control-sm\" name=\"category\" placeholder=\"Category\" required>
+            </div>
+            <div class=\"col\">
+              <input class=\"form-control form-control-sm\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" placeholder=\"Goal\" required>
+            </div>
+            <div class=\"col\">
+              <select class=\"form-select form-select-sm\" name=\"meta\">
+                <option value=\"\">Meta</option>
+                {% for m in meta_allowed %}
+                  <option value=\"{{ m }}\">{{ m }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class=\"col d-flex justify-content-end\">
+              <button class=\"btn btn-sm btn-primary\" type=\"submit\">Add</button>
+            </div>
+          </form>
+          <div class=\"row g-3\">
+            <div class=\"col-12 col-lg-6\">
+              <div class=\"d-flex justify-content-between align-items-center mb-2\">
+                <h6 class=\"mb-0\">Filling</h6>
+                <span class=\"badge text-bg-secondary\">{{ bucket_totals.filling_count }}</span>
+              </div>
+              {% for b in bucket_filling %}
+                <div class=\"mb-3 p-2 border rounded\">
+                  <div class=\"d-flex justify-content-between align-items-center\">
+                    <div>
+                      <div class=\"fw-semibold\">{{ b.name }}</div>
+                      <div class=\"text-muted small\">{{ b.category or 'Uncategorized' }}{% if b.meta %} · {{ b.meta }}{% endif %}</div>
+                    </div>
+                    <div class=\"text-muted small\">{{ '%.0f'|format(b.progress_pct) }}%</div>
+                  </div>
+                  <div class=\"progress my-2\" style=\"height: 6px;\">
+                    <div class=\"progress-bar\" role=\"progressbar\" style=\"width: {{ b.progress_pct }}%;\"></div>
+                  </div>
+                  <div class=\"d-flex justify-content-between align-items-center\">
+                    <div class=\"text-muted small\">{{ '%.2f'|format(b.current) }} / {{ '%.2f'|format(b.goal) }}</div>
+                    <form class=\"d-flex gap-2\" method=\"post\" action=\"{{ url_for('buckets_contribute', bucket_id=b.id) }}\">
+                      <input type=\"hidden\" name=\"_redirect\" value=\"index\">
+                      <input type=\"hidden\" name=\"_redirect_month\" value=\"{{ month }}\">
+                      <input class=\"form-control form-control-sm\" name=\"amount\" type=\"number\" step=\"any\" min=\"0\" placeholder=\"Add\" required>
+                      <button class=\"btn btn-sm btn-outline-primary\" type=\"submit\">Add</button>
+                    </form>
+                  </div>
+                </div>
+              {% else %}
+                <div class=\"text-muted small\">No filling buckets yet.</div>
+              {% endfor %}
+            </div>
+            <div class=\"col-12 col-lg-6\">
+              <div class=\"d-flex justify-content-between align-items-center mb-2\">
+                <h6 class=\"mb-0\">Ready to spend</h6>
+                <span class=\"badge text-bg-success\">{{ bucket_totals.ready_count }}</span>
+              </div>
+              {% for b in bucket_ready %}
+                <div class=\"mb-3 p-2 border rounded\">
+                  <div class=\"d-flex justify-content-between align-items-center\">
+                    <div>
+                      <div class=\"fw-semibold\">{{ b.name }}</div>
+                      <div class=\"text-muted small\">{{ b.category or 'Uncategorized' }}{% if b.meta %} · {{ b.meta }}{% endif %}</div>
+                    </div>
+                    <span class=\"badge text-bg-success\">Ready</span>
+                  </div>
+                  <div class=\"progress my-2\" style=\"height: 6px;\">
+                    <div class=\"progress-bar bg-success\" role=\"progressbar\" style=\"width: {{ b.progress_pct }}%;\"></div>
+                  </div>
+                  <div class=\"d-flex justify-content-between align-items-center\">
+                    <div class=\"text-muted small\">{{ '%.2f'|format(b.current) }} / {{ '%.2f'|format(b.goal) }}</div>
+                    <form method=\"post\" action=\"{{ url_for('buckets_spend', bucket_id=b.id) }}\">
+                      <input type=\"hidden\" name=\"_redirect\" value=\"index\">
+                      <input type=\"hidden\" name=\"_redirect_month\" value=\"{{ month }}\">
+                      <button class=\"btn btn-sm btn-success\" type=\"submit\">Spend &amp; archive</button>
+                    </form>
+                  </div>
+                </div>
+              {% else %}
+                <div class=\"text-muted small\">No buckets ready yet.</div>
+              {% endfor %}
+              {% if bucket_recent %}
+                <div class=\"mt-3\">
+                  <div class=\"text-muted small mb-1\">Recently completed</div>
+                  <ul class=\"list-group list-group-flush\">
+                    {% for b in bucket_recent %}
+                      <li class=\"list-group-item d-flex justify-content-between align-items-center px-0\">
+                        <span>{{ b.name }} <span class=\"badge text-bg-secondary ms-2\">{{ b.status }}</span> <span class=\"text-muted small ms-2\">{{ b.category or 'Uncategorized' }}{% if b.meta %} · {{ b.meta }}{% endif %}</span></span>
+                        <span class=\"text-muted small\">{{ b.updated_at }}</span>
+                      </li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class=\"row g-4\">
         <div class=\"col-12 col-lg-6\">
           <div class=\"card shadow-sm chart-card\">
@@ -523,14 +811,27 @@ renderPie('pie_sub', pieSub);
   <div class=\"card mb-4 shadow-sm\">
     <div class=\"card-body\">
       <h5 class=\"card-title\">Create bucket</h5>
-      <form class=\"row row-cols-1 row-cols-md-3 g-3\" method=\"post\" action=\"{{ url_for('buckets_add') }}\">
+      <form class=\"row row-cols-1 row-cols-md-4 g-3\" method=\"post\" action=\"{{ url_for('buckets_add') }}\">
         <div class=\"col\">
           <label class=\"form-label\">Name</label>
           <input class=\"form-control\" name=\"name\" placeholder=\"e.g., Vacation\" required>
         </div>
         <div class=\"col\">
+          <label class=\"form-label\">Category</label>
+          <input class=\"form-control\" name=\"category\" placeholder=\"e.g., Tech\" required>
+        </div>
+        <div class=\"col\">
           <label class=\"form-label\">Goal amount</label>
           <input class=\"form-control\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" placeholder=\"e.g., 1500\" required>
+        </div>
+        <div class=\"col\">
+          <label class=\"form-label\">Meta (optional)</label>
+          <select class=\"form-select\" name=\"meta\">
+            <option value=\"\">Auto</option>
+            {% for m in meta_allowed %}
+              <option value=\"{{ m }}\">{{ m }}</option>
+            {% endfor %}
+          </select>
         </div>
         <div class=\"col d-flex align-items-end\">
           <button class=\"btn btn-primary\" type=\"submit\">Add bucket</button>
@@ -548,7 +849,7 @@ renderPie('pie_sub', pieSub);
             <div class=\"d-flex justify-content-between align-items-start\">
               <div>
                 <h6 class=\"mb-1\">{{ b.name }}</h6>
-                <div class=\"text-muted small\">Status: {{ b.status }}</div>
+                <div class=\"text-muted small\">{{ b.category or 'Uncategorized' }}{% if b.meta %} · {{ b.meta }}{% endif %} · Status: {{ b.status }}</div>
               </div>
               <div class=\"d-flex align-items-start gap-2\">
                 <div class=\"text-end fw-semibold\">{{ '%.2f'|format(b.current) }} / {{ '%.2f'|format(b.goal) }}</div>
@@ -589,8 +890,21 @@ renderPie('pie_sub', pieSub);
                   <input class=\"form-control\" name=\"name\" value=\"{{ b.name }}\" required>
                 </div>
                 <div class=\"col\">
+                  <label class=\"form-label\">Category</label>
+                  <input class=\"form-control\" name=\"category\" value=\"{{ b.category }}\" required>
+                </div>
+                <div class=\"col\">
                   <label class=\"form-label\">Goal</label>
                   <input class=\"form-control\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" value=\"{{ '%.2f'|format(b.goal) }}\" required>
+                </div>
+                <div class=\"col\">
+                  <label class=\"form-label\">Meta</label>
+                  <select class=\"form-select\" name=\"meta\">
+                    <option value=\"\">Auto</option>
+                    {% for m in meta_allowed %}
+                      <option value=\"{{ m }}\" {% if b.meta == m %}selected{% endif %}>{{ m }}</option>
+                    {% endfor %}
+                  </select>
                 </div>
                 <div class=\"col d-flex align-items-end\">
                   <button class=\"btn btn-outline-secondary\" type=\"submit\">Save</button>
@@ -612,7 +926,7 @@ renderPie('pie_sub', pieSub);
             <div class=\"d-flex justify-content-between align-items-start\">
               <div>
                 <h6 class=\"mb-1\">{{ b.name }}</h6>
-                <div class=\"text-muted small\">Status: {{ b.status }}</div>
+                <div class=\"text-muted small\">{{ b.category or 'Uncategorized' }}{% if b.meta %} · {{ b.meta }}{% endif %} · Status: {{ b.status }}</div>
               </div>
               <div class=\"d-flex align-items-start gap-2\">
                 <div class=\"text-end fw-semibold\">{{ '%.2f'|format(b.current) }} / {{ '%.2f'|format(b.goal) }}</div>
@@ -645,8 +959,21 @@ renderPie('pie_sub', pieSub);
                   <input class=\"form-control\" name=\"name\" value=\"{{ b.name }}\" required>
                 </div>
                 <div class=\"col\">
+                  <label class=\"form-label\">Category</label>
+                  <input class=\"form-control\" name=\"category\" value=\"{{ b.category }}\" required>
+                </div>
+                <div class=\"col\">
                   <label class=\"form-label\">Goal</label>
                   <input class=\"form-control\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" value=\"{{ '%.2f'|format(b.goal) }}\" required>
+                </div>
+                <div class=\"col\">
+                  <label class=\"form-label\">Meta</label>
+                  <select class=\"form-select\" name=\"meta\">
+                    <option value=\"\">Auto</option>
+                    {% for m in meta_allowed %}
+                      <option value=\"{{ m }}\" {% if b.meta == m %}selected{% endif %}>{{ m }}</option>
+                    {% endfor %}
+                  </select>
                 </div>
                 <div class=\"col d-flex align-items-end\">
                   <button class=\"btn btn-outline-secondary\" type=\"submit\">Save</button>
@@ -674,7 +1001,7 @@ renderPie('pie_sub', pieSub);
               <div class=\"d-flex justify-content-between align-items-start\">
                 <div>
                   <h6 class=\"mb-1\">{{ b.name }}</h6>
-                  <div class=\"text-muted small\">{{ b.status }} · Updated {{ b.updated_at }}</div>
+                  <div class=\"text-muted small\">{{ b.category or 'Uncategorized' }}{% if b.meta %} · {{ b.meta }}{% endif %} · {{ b.status }} · Updated {{ b.updated_at }}</div>
                 </div>
                 <div class=\"btn-group dropstart\">
                   <button class=\"btn btn-sm btn-outline-secondary dropdown-toggle\" type=\"button\" data-bs-toggle=\"dropdown\" aria-expanded=\"false\">⋮</button>
@@ -697,8 +1024,21 @@ renderPie('pie_sub', pieSub);
                     <input class=\"form-control\" name=\"name\" value=\"{{ b.name }}\" required>
                   </div>
                   <div class=\"col\">
+                    <label class=\"form-label\">Category</label>
+                    <input class=\"form-control\" name=\"category\" value=\"{{ b.category }}\" required>
+                  </div>
+                  <div class=\"col\">
                     <label class=\"form-label\">Goal</label>
                     <input class=\"form-control\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" value=\"{{ '%.2f'|format(b.goal) }}\" required>
+                  </div>
+                  <div class=\"col\">
+                    <label class=\"form-label\">Meta</label>
+                    <select class=\"form-select\" name=\"meta\">
+                      <option value=\"\">Auto</option>
+                      {% for m in meta_allowed %}
+                        <option value=\"{{ m }}\" {% if b.meta == m %}selected{% endif %}>{{ m }}</option>
+                      {% endfor %}
+                    </select>
                   </div>
                   <div class=\"col d-flex align-items-end\">
                     <button class=\"btn btn-outline-secondary\" type=\"submit\">Save</button>
@@ -720,7 +1060,7 @@ renderPie('pie_sub', pieSub);
                   <div class=\"d-flex justify-content-between align-items-start\">
                     <div>
                       <h6 class=\"mb-1\">{{ b.name }}</h6>
-                      <div class=\"text-muted small\">archived · Updated {{ b.updated_at }}</div>
+                      <div class=\"text-muted small\">{{ b.category or 'Uncategorized' }}{% if b.meta %} · {{ b.meta }}{% endif %} · archived · Updated {{ b.updated_at }}</div>
                     </div>
                     <div class=\"btn-group dropstart\">
                       <button class=\"btn btn-sm btn-outline-secondary dropdown-toggle\" type=\"button\" data-bs-toggle=\"dropdown\" aria-expanded=\"false\">⋮</button>
@@ -743,8 +1083,21 @@ renderPie('pie_sub', pieSub);
                         <input class=\"form-control\" name=\"name\" value=\"{{ b.name }}\" required>
                       </div>
                       <div class=\"col\">
+                        <label class=\"form-label\">Category</label>
+                        <input class=\"form-control\" name=\"category\" value=\"{{ b.category }}\" required>
+                      </div>
+                      <div class=\"col\">
                         <label class=\"form-label\">Goal</label>
                         <input class=\"form-control\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" value=\"{{ '%.2f'|format(b.goal) }}\" required>
+                      </div>
+                      <div class=\"col\">
+                        <label class=\"form-label\">Meta</label>
+                        <select class=\"form-select\" name=\"meta\">
+                          <option value=\"\">Auto</option>
+                          {% for m in meta_allowed %}
+                            <option value=\"{{ m }}\" {% if b.meta == m %}selected{% endif %}>{{ m }}</option>
+                          {% endfor %}
+                        </select>
                       </div>
                       <div class=\"col d-flex align-items-end\">
                         <button class=\"btn btn-outline-secondary\" type=\"submit\">Save</button>
@@ -767,7 +1120,7 @@ renderPie('pie_sub', pieSub);
 </html>
 """
 
-    def _enrich_bucket_rows(rows):
+    def _enrich_bucket_rows(rows, mappings=None):
         enriched = []
         for r in rows:
             data = dict(r)
@@ -777,6 +1130,9 @@ renderPie('pie_sub', pieSub);
             data["goal"] = goal
             data["current"] = current
             data["progress_pct"] = pct
+            cat = (data.get("category") or "").strip()
+            data["category"] = cat
+            data["meta"] = mappings.get(cat) if mappings else None
             enriched.append(data)
         return enriched
 
@@ -784,20 +1140,21 @@ renderPie('pie_sub', pieSub);
     def buckets_index():
         show_archived = request.args.get("show_archived") == "1"
         with engine.connect() as conn:
+            mappings = dict(conn.execute(text(f"SELECT category, meta FROM {TABLE_META_MAP} ORDER BY category")).fetchall())
             filling_rows = conn.execute(text(f"""
-                SELECT id, name, goal, current, status, created_at, updated_at
+                SELECT id, name, category, goal, current, status, created_at, updated_at
                 FROM {TABLE_BUCKETS}
                 WHERE status = 'filling'
                 ORDER BY datetime(created_at) DESC
             """)).mappings().all()
             ready_rows = conn.execute(text(f"""
-                SELECT id, name, goal, current, status, created_at, updated_at
+                SELECT id, name, category, goal, current, status, created_at, updated_at
                 FROM {TABLE_BUCKETS}
                 WHERE status = 'ready'
                 ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
             """)).mappings().all()
             completed_rows = conn.execute(text(f"""
-                SELECT id, name, goal, current, status, created_at, updated_at
+                SELECT id, name, category, goal, current, status, created_at, updated_at
                 FROM {TABLE_BUCKETS}
                 WHERE status IN ('spent','archived')
                 ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
@@ -806,7 +1163,7 @@ renderPie('pie_sub', pieSub);
             archived_rows = []
             if show_archived:
                 archived_rows = conn.execute(text(f"""
-                    SELECT id, name, goal, current, status, created_at, updated_at
+                    SELECT id, name, category, goal, current, status, created_at, updated_at
                     FROM {TABLE_BUCKETS}
                     WHERE status = 'archived'
                     ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
@@ -814,45 +1171,61 @@ renderPie('pie_sub', pieSub);
 
         return render_template_string(
             PAGE_BUCKETS,
-            filling=_enrich_bucket_rows(filling_rows),
-            ready=_enrich_bucket_rows(ready_rows),
-            completed=_enrich_bucket_rows(completed_rows),
-            archived=_enrich_bucket_rows(archived_rows),
+            filling=_enrich_bucket_rows(filling_rows, mappings),
+            ready=_enrich_bucket_rows(ready_rows, mappings),
+            completed=_enrich_bucket_rows(completed_rows, mappings),
+            archived=_enrich_bucket_rows(archived_rows, mappings),
             show_archived=show_archived,
+            meta_allowed=META_ALLOWED,
         )
 
     @app.post("/buckets/add")
     def buckets_add():
         name = (request.form.get("name") or "").strip()
+        category = (request.form.get("category") or "").strip()
         goal_raw = (request.form.get("goal") or "").strip()
+        meta_choice = (request.form.get("meta") or "").strip()
+        redirect_to = (request.form.get("_redirect") or "").strip()
+        redirect_month = (request.form.get("_redirect_month") or "").strip()
         try:
             goal = float(goal_raw)
             if goal <= 0:
                 raise ValueError
         except ValueError:
             flash("Goal must be a positive number.")
-            return redirect(url_for("buckets_index"))
-        if not name:
-            flash("Bucket name is required.")
-            return redirect(url_for("buckets_index"))
+            return redirect(url_for("index", month=redirect_month) if redirect_to == "index" else url_for("buckets_index"))
+        if not name or not category:
+            flash("Bucket name and category are required.")
+            return redirect(url_for("index", month=redirect_month) if redirect_to == "index" else url_for("buckets_index"))
         with engine.begin() as conn:
             conn.execute(text(f"""
-                INSERT INTO {TABLE_BUCKETS} (name, goal, current, status)
-                VALUES (:name, :goal, 0, 'filling')
-            """), {"name": name, "goal": goal})
+                INSERT INTO {TABLE_BUCKETS} (name, category, goal, current, status)
+                VALUES (:name, :category, :goal, 0, 'filling')
+            """), {"name": name, "category": category, "goal": goal})
+            if meta_choice in META_ALLOWED:
+                conn.execute(
+                    text(f"INSERT INTO {TABLE_META_MAP} (category, meta) VALUES (:c, :m) ON CONFLICT(category) DO UPDATE SET meta=excluded.meta"),
+                    {"c": category, "m": meta_choice},
+                )
         flash("Bucket created.")
+        if redirect_to == "index":
+            return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
         return redirect(url_for("buckets_index"))
 
     @app.post("/buckets/contribute/<int:bucket_id>")
     def buckets_contribute(bucket_id: int):
         show_archived = (request.form.get("show_archived") or "").strip() == "1"
         amount_raw = (request.form.get("amount") or "").strip()
+        redirect_to = (request.form.get("_redirect") or "").strip()
+        redirect_month = (request.form.get("_redirect_month") or "").strip()
         try:
             amount = float(amount_raw)
             if amount <= 0:
                 raise ValueError
         except ValueError:
             flash("Contribution must be a positive number.")
+            if redirect_to == "index":
+                return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
             return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
 
         with engine.begin() as conn:
@@ -861,6 +1234,8 @@ renderPie('pie_sub', pieSub);
             """), {"id": bucket_id}).mappings().first()
             if not bucket:
                 flash("Bucket not found.")
+                if redirect_to == "index":
+                    return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
                 return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
 
             goal = float(bucket["goal"] or 0.0)
@@ -878,22 +1253,32 @@ renderPie('pie_sub', pieSub);
                 WHERE id = :id
             """), {"cur": new_current, "status": status, "updated_at": now_ts, "id": bucket_id})
         flash("Contribution added.")
+        if redirect_to == "index":
+            return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
         return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
 
     @app.post("/buckets/edit/<int:bucket_id>")
     def buckets_edit(bucket_id: int):
         show_archived = (request.form.get("show_archived") or "").strip() == "1"
         name = (request.form.get("name") or "").strip()
+        category = (request.form.get("category") or "").strip()
         goal_raw = (request.form.get("goal") or "").strip()
+        meta_choice = (request.form.get("meta") or "").strip()
+        redirect_to = (request.form.get("_redirect") or "").strip()
+        redirect_month = (request.form.get("_redirect_month") or "").strip()
         try:
             goal = float(goal_raw)
             if goal <= 0:
                 raise ValueError
         except ValueError:
             flash("Goal must be a positive number.")
+            if redirect_to == "index":
+                return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
             return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
-        if not name:
-            flash("Bucket name is required.")
+        if not name or not category:
+            flash("Bucket name and category are required.")
+            if redirect_to == "index":
+                return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
             return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
 
         with engine.begin() as conn:
@@ -902,6 +1287,8 @@ renderPie('pie_sub', pieSub);
             """), {"id": bucket_id}).mappings().first()
             if not bucket:
                 flash("Bucket not found.")
+                if redirect_to == "index":
+                    return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
                 return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
             current = float(bucket["current"] or 0.0)
             status = bucket["status"]
@@ -911,22 +1298,34 @@ renderPie('pie_sub', pieSub);
             conn.execute(text(f"""
                 UPDATE {TABLE_BUCKETS}
                 SET name = :name,
+                    category = :category,
                     goal = :goal,
                     status = :status,
                     updated_at = :updated_at
                 WHERE id = :id
-            """), {"name": name, "goal": goal, "status": status, "updated_at": now_ts, "id": bucket_id})
+            """), {"name": name, "category": category, "goal": goal, "status": status, "updated_at": now_ts, "id": bucket_id})
+            if meta_choice in META_ALLOWED:
+                conn.execute(
+                    text(f"INSERT INTO {TABLE_META_MAP} (category, meta) VALUES (:c, :m) ON CONFLICT(category) DO UPDATE SET meta=excluded.meta"),
+                    {"c": category, "m": meta_choice},
+                )
         flash("Bucket updated.")
+        if redirect_to == "index":
+            return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
         return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
 
     @app.post("/buckets/spend/<int:bucket_id>")
     def buckets_spend(bucket_id: int):
         show_archived = (request.form.get("show_archived") or "").strip() == "1"
+        redirect_to = (request.form.get("_redirect") or "").strip()
+        redirect_month = (request.form.get("_redirect_month") or "").strip()
         now_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         with engine.begin() as conn:
             exists = conn.execute(text(f"SELECT 1 FROM {TABLE_BUCKETS} WHERE id = :id"), {"id": bucket_id}).first()
             if not exists:
                 flash("Bucket not found.")
+                if redirect_to == "index":
+                    return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
                 return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
             conn.execute(text(f"""
                 UPDATE {TABLE_BUCKETS}
@@ -936,17 +1335,23 @@ renderPie('pie_sub', pieSub);
                 WHERE id = :id
             """), {"updated_at": now_ts, "id": bucket_id})
         flash("Bucket archived.")
+        if redirect_to == "index":
+            return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
         return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
 
     @app.post("/buckets/delete/<int:bucket_id>")
     def buckets_delete(bucket_id: int):
         show_archived = (request.form.get("show_archived") or "").strip() == "1"
+        redirect_to = (request.form.get("_redirect") or "").strip()
+        redirect_month = (request.form.get("_redirect_month") or "").strip()
         with engine.begin() as conn:
             result = conn.execute(text(f"DELETE FROM {TABLE_BUCKETS} WHERE id = :id"), {"id": bucket_id})
         if result.rowcount:
             flash("Bucket deleted.")
         else:
             flash("Bucket not found.")
+        if redirect_to == "index":
+            return redirect(url_for("index", month=redirect_month) if redirect_month else url_for("index"))
         return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
 
     @app.get("/")
@@ -954,6 +1359,8 @@ renderPie('pie_sub', pieSub);
         month = _month_param_or_current()
         prev_month, next_month = _adjacent_months(month)
         start_ts, end_ts = _month_bounds(month)
+        start_date_only = start_ts.split(" ")[0]
+        end_date_only = end_ts.split(" ")[0]
 
         with engine.connect() as conn:
             # Transactions in month
@@ -992,10 +1399,39 @@ renderPie('pie_sub', pieSub);
             trow = conn.execute(text(f"SELECT needs, wants, savings FROM {TABLE_TARGETS} WHERE id=1")).first()
             targets = {"needs": float(trow[0]), "wants": float(trow[1]), "savings": float(trow[2])}
 
+            # Payroll entries (bi-weekly captures)
+            payroll_entries = conn.execute(text(f"""
+                SELECT id, pay_date, gross, tax, k401, hsa, espp, other, notes
+                FROM {TABLE_PAYROLL}
+                WHERE date(pay_date) BETWEEN date(:start) AND date(:end)
+                ORDER BY date(pay_date) DESC
+            """), {"start": start_date_only, "end": end_date_only}).mappings().all()
+
             # Subscriptions list
             subs = conn.execute(
                 text(f"SELECT rowid, name, category, amount, day_of_month, active FROM {TABLE_SUB} ORDER BY name")
             ).mappings().all()
+
+            # Buckets (overview for dashboard)
+            bucket_filling_rows = conn.execute(text(f"""
+                SELECT id, name, category, goal, current, status, created_at, updated_at
+                FROM {TABLE_BUCKETS}
+                WHERE status = 'filling'
+                ORDER BY datetime(created_at) DESC
+            """)).mappings().all()
+            bucket_ready_rows = conn.execute(text(f"""
+                SELECT id, name, category, goal, current, status, created_at, updated_at
+                FROM {TABLE_BUCKETS}
+                WHERE status = 'ready'
+                ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
+            """)).mappings().all()
+            bucket_recent_rows = conn.execute(text(f"""
+                SELECT id, name, category, goal, current, status, created_at, updated_at
+                FROM {TABLE_BUCKETS}
+                WHERE status IN ('spent','archived')
+                ORDER BY datetime(updated_at) DESC
+                LIMIT 5
+            """)).mappings().all()
 
         # Build meta totals (sum of spend magnitudes by mapped meta)
         meta_totals = {"Needs": 0.0, "Wants": 0.0, "Savings": 0.0, "Uncategorized": 0.0}
@@ -1031,8 +1467,45 @@ renderPie('pie_sub', pieSub);
         meta_summary.append({"name": "Wants",   "planned": planned_wants,   "actual": actual_wants,   "remaining": (planned_wants - actual_wants)})
         meta_summary.append({"name": "Savings", "planned": planned_savings, "actual": actual_savings, "remaining": (planned_savings - actual_savings)})
 
+        # Payroll summary (bi-weekly captures)
+        payroll_summary = {"gross": 0.0, "tax": 0.0, "k401": 0.0, "hsa": 0.0, "espp": 0.0, "other": 0.0, "net": 0.0}
+        payroll_rows = []
+        for p in payroll_entries:
+            gross = float(p.get("gross") or 0.0)
+            tax = float(p.get("tax") or 0.0)
+            k401 = float(p.get("k401") or 0.0)
+            hsa = float(p.get("hsa") or 0.0)
+            espp = float(p.get("espp") or 0.0)
+            other = float(p.get("other") or 0.0)
+            net = gross - tax - k401 - hsa - espp - other
+            payroll_summary["gross"] += gross
+            payroll_summary["tax"] += tax
+            payroll_summary["k401"] += k401
+            payroll_summary["hsa"] += hsa
+            payroll_summary["espp"] += espp
+            payroll_summary["other"] += other
+            payroll_summary["net"] += net
+            rec = dict(p)
+            rec["net"] = net
+            payroll_rows.append(rec)
+
         # Overall month total (net)
         month_total = sum([float(r["total_amount"] or 0) for r in totals_by_cat])
+
+        # Bucket summaries
+        bucket_filling = _enrich_bucket_rows(bucket_filling_rows, mappings)
+        bucket_ready = _enrich_bucket_rows(bucket_ready_rows, mappings)
+        bucket_recent = _enrich_bucket_rows(bucket_recent_rows, mappings)
+        active_buckets = bucket_filling + bucket_ready
+        active_goal = sum([b["goal"] for b in active_buckets])
+        active_current = sum([b["current"] for b in active_buckets])
+        bucket_totals = {
+            "goal": active_goal,
+            "current": active_current,
+            "progress_pct": 0.0 if active_goal <= 0 else min(100.0, round((active_current / active_goal) * 100, 2)),
+            "ready_count": len(bucket_ready),
+            "filling_count": len(bucket_filling),
+        }
 
         return render_template_string(
             PAGE_TEMPLATE,
@@ -1048,6 +1521,12 @@ renderPie('pie_sub', pieSub);
             income=income,
             meta_summary=meta_summary,
             meta_allowed=META_ALLOWED,
+            payroll_rows=payroll_rows,
+            payroll_summary=payroll_summary,
+            bucket_filling=bucket_filling,
+            bucket_ready=bucket_ready,
+            bucket_recent=bucket_recent,
+            bucket_totals=bucket_totals,
             pie_meta=json.dumps(pie_meta),
             pie_sub=json.dumps(pie_sub),
         )
@@ -1262,6 +1741,45 @@ renderPie('pie_sub', pieSub);
         flash("Targets saved.")
         return redirect(url_for("index"))
 
+    # ---- Payroll (bi-weekly captures) ----
+    @app.post("/payroll/add")
+    def payroll_add():
+        pay_date = (request.form.get("pay_date") or "").strip()
+        gross_raw = (request.form.get("gross") or "0").strip()
+        tax_raw = (request.form.get("tax") or "0").strip()
+        k401_raw = (request.form.get("k401") or "0").strip()
+        hsa_raw = (request.form.get("hsa") or "0").strip()
+        espp_raw = (request.form.get("espp") or "0").strip()
+        other_raw = (request.form.get("other") or "0").strip()
+        notes = (request.form.get("notes") or "").strip()
+        month = (request.form.get("_redirect_month") or "").strip()
+        try:
+            datetime.strptime(pay_date, "%Y-%m-%d")
+            gross = float(gross_raw or 0)
+            tax = float(tax_raw or 0)
+            k401 = float(k401_raw or 0)
+            hsa = float(hsa_raw or 0)
+            espp = float(espp_raw or 0)
+            other = float(other_raw or 0)
+        except ValueError:
+            flash("Please provide a valid pay date and numeric amounts.")
+            return redirect(url_for("index", month=month) if month else url_for("index"))
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+                INSERT INTO {TABLE_PAYROLL} (pay_date, gross, tax, k401, hsa, espp, other, notes)
+                VALUES (:pay_date, :gross, :tax, :k401, :hsa, :espp, :other, :notes)
+            """), {"pay_date": pay_date, "gross": gross, "tax": tax, "k401": k401, "hsa": hsa, "espp": espp, "other": other, "notes": notes})
+        flash("Payroll entry added.")
+        return redirect(url_for("index", month=month) if month else url_for("index"))
+
+    @app.post("/payroll/delete/<int:rowid>")
+    def payroll_delete(rowid: int):
+        month = (request.form.get("_redirect_month") or "").strip()
+        with engine.begin() as conn:
+            conn.execute(text(f"DELETE FROM {TABLE_PAYROLL} WHERE id = :id"), {"id": rowid})
+        flash("Payroll entry removed.")
+        return redirect(url_for("index", month=month) if month else url_for("index"))
+
     # Expose engine/tables for tests
     app.config["_ENGINE"] = engine
     app.config["_TABLE_TX"] = TABLE_TX
@@ -1270,6 +1788,7 @@ renderPie('pie_sub', pieSub);
     app.config["_TABLE_INCOME"] = TABLE_INCOME
     app.config["_TABLE_TARGETS"] = TABLE_TARGETS
     app.config["_TABLE_BUCKETS"] = TABLE_BUCKETS
+    app.config["_TABLE_PAYROLL"] = TABLE_PAYROLL
 
     return app
 
