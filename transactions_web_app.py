@@ -316,11 +316,15 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
             <span class=\"badge text-bg-warning text-dark\">Wants {{ targets.wants }}%</span>
             <span class=\"badge text-bg-success\">Savings {{ targets.savings }}%</span>
           </div>
-          {% if income is not none %}
-            <div class=\"text-muted small mt-1\">Income set: {{ '%.2f'|format(income) }}</div>
-          {% else %}
-            <div class=\"text-muted small mt-1\">No income set for {{ month }}.</div>
-          {% endif %}
+          <div class=\"mt-2 d-flex gap-2 flex-wrap\">
+            {% for t in targets_status %}
+              <span class=\"badge text-bg-{{ 'success' if t.met else 'danger' }}\">{{ t.name }} {{ 'on track' if t.met else 'off track' }}</span>
+            {% endfor %}
+          </div>
+          <div class=\"text-muted small mt-2\">
+            Income basis: {{ '%.2f'|format(effective_income or 0) }}
+            {% if manual_income_set %}(override set){% else %}(auto from payroll){% endif %}.
+          </div>
         </div>
       </div>
     </div>
@@ -565,17 +569,25 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
       <div class=\"card mt-4 shadow-sm\">
         <div class=\"card-body\">
           <h5 class=\"card-title\">Budget ({{ month }})</h5>
-          <form class=\"row row-cols-1 g-2 align-items-end\" method=\"post\" action=\"{{ url_for('income_set') }}\">
+          <div class=\"mb-2 text-muted small\">Income is auto-derived from payroll net; override only if needed.</div>
+          <form class=\"row row-cols-1 row-cols-sm-2 g-2 align-items-end\" method=\"post\" action=\"{{ url_for('income_set') }}\">
             <input type=\"hidden\" name=\"month\" value=\"{{ month }}\">
             <div class=\"col\">
-              <label class=\"form-label\">Monthly income</label>
-              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"income\" value=\"{{ income or '' }}\" placeholder=\"e.g., 5000\">
+              <label class=\"form-label\">Income (auto or override)</label>
+              <input class=\"form-control\" type=\"number\" step=\"any\" name=\"income\" value=\"{{ income or '' }}\" placeholder=\"{{ '%.2f'|format(payroll_summary.net) }}\">
+              <div class=\"form-text\">Auto from payroll: {{ '%.2f'|format(payroll_summary.net) }}{% if manual_income_set %}; override in use{% endif %}</div>
             </div>
             <div class=\"col\">
-              <button class=\"btn btn-outline-primary\" type=\"submit\">Save income</button>
+              <button class=\"btn btn-outline-primary\" type=\"submit\">Save override</button>
             </div>
           </form>
-          <hr/>
+          {% if manual_income_set %}
+          <form class=\"mt-2\" method=\"post\" action=\"{{ url_for('income_clear') }}\">
+            <input type=\"hidden\" name=\"month\" value=\"{{ month }}\">
+            <button class=\"btn btn-sm btn-outline-secondary\" type=\"submit\">Clear override (use payroll)</button>
+          </form>
+          {% endif %}
+          <hr class=\"my-3\"/>
           <form class=\"row row-cols-3 g-2 align-items-end\" method=\"post\" action=\"{{ url_for('targets_set') }}\">
             <div>
               <label class=\"form-label\">Needs %</label>
@@ -1511,21 +1523,6 @@ renderPie('pie_sub', pieSub);
             "values": [round(v, 2) for v in spend_map.values()]
         }
 
-        # Budget summary (planned from income * targets, actual from meta_totals)
-        meta_summary = []
-        if income is None:
-            planned_needs = planned_wants = planned_savings = 0.0
-        else:
-            planned_needs   = income * (targets["needs"]/100.0)
-            planned_wants   = income * (targets["wants"]/100.0)
-            planned_savings = income * (targets["savings"]/100.0)
-        actual_needs   = meta_totals["Needs"]
-        actual_wants   = meta_totals["Wants"]
-        actual_savings = meta_totals["Savings"]
-        meta_summary.append({"name": "Needs",   "planned": planned_needs,   "actual": actual_needs,   "remaining": (planned_needs - actual_needs)})
-        meta_summary.append({"name": "Wants",   "planned": planned_wants,   "actual": actual_wants,   "remaining": (planned_wants - actual_wants)})
-        meta_summary.append({"name": "Savings", "planned": planned_savings, "actual": actual_savings, "remaining": (planned_savings - actual_savings)})
-
         # Payroll summary (bi-weekly captures)
         payroll_summary = {"gross": 0.0, "tax": 0.0, "k401": 0.0, "hsa": 0.0, "espp": 0.0, "other": 0.0, "net": 0.0}
         payroll_rows = []
@@ -1547,6 +1544,31 @@ renderPie('pie_sub', pieSub);
             rec = dict(p)
             rec["net"] = net
             payroll_rows.append(rec)
+
+        # Use payroll net as default income if not manually set
+        manual_income_set = income is not None
+        effective_income = income if manual_income_set else payroll_summary["net"]
+
+        # Budget summary (planned from income * targets, actual from meta_totals)
+        meta_summary = []
+        if effective_income is None:
+            planned_needs = planned_wants = planned_savings = 0.0
+        else:
+            planned_needs   = effective_income * (targets["needs"]/100.0)
+            planned_wants   = effective_income * (targets["wants"]/100.0)
+            planned_savings = effective_income * (targets["savings"]/100.0)
+        actual_needs   = meta_totals["Needs"]
+        actual_wants   = meta_totals["Wants"]
+        savings_from_payroll = payroll_summary["k401"] + payroll_summary["hsa"] + payroll_summary["espp"]
+        actual_savings = meta_totals["Savings"] + savings_from_payroll
+        meta_summary.append({"name": "Needs",   "planned": planned_needs,   "actual": actual_needs,   "remaining": (planned_needs - actual_needs)})
+        meta_summary.append({"name": "Wants",   "planned": planned_wants,   "actual": actual_wants,   "remaining": (planned_wants - actual_wants)})
+        meta_summary.append({"name": "Savings", "planned": planned_savings, "actual": actual_savings, "remaining": (planned_savings - actual_savings)})
+
+        targets_status = []
+        targets_status.append({"name": "Needs", "met": actual_needs <= planned_needs + 1e-6})
+        targets_status.append({"name": "Wants", "met": actual_wants <= planned_wants + 1e-6})
+        targets_status.append({"name": "Savings", "met": actual_savings >= planned_savings - 1e-6})
 
         # Overall month total (net)
         month_total = sum([float(r["total_amount"] or 0) for r in totals_by_cat])
@@ -1584,6 +1606,9 @@ renderPie('pie_sub', pieSub);
             payroll_rows=payroll_rows,
             payroll_summary=payroll_summary,
             net_after_expenses=net_after_expenses,
+            effective_income=effective_income,
+            manual_income_set=manual_income_set,
+            targets_status=targets_status,
             bucket_filling=bucket_filling,
             bucket_ready=bucket_ready,
             bucket_recent=bucket_recent,
@@ -1783,6 +1808,14 @@ renderPie('pie_sub', pieSub);
         with engine.begin() as conn:
             conn.execute(text(f"INSERT INTO {TABLE_INCOME} (month, income) VALUES (:m,:i) ON CONFLICT(month) DO UPDATE SET income=excluded.income"), {"m": month, "i": income})
         flash("Income saved.")
+        return redirect(url_for("index", month=month) if month else url_for("index"))
+
+    @app.post("/income/clear")
+    def income_clear():
+        month = (request.form.get("month") or "").strip()
+        with engine.begin() as conn:
+            conn.execute(text(f"DELETE FROM {TABLE_INCOME} WHERE month=:m"), {"m": month})
+        flash("Income override cleared; using payroll net.")
         return redirect(url_for("index", month=month) if month else url_for("index"))
 
     @app.post("/targets/set")
