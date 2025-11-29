@@ -116,6 +116,7 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
     TABLE_META_MAP = "category_meta"         # category -> meta
     TABLE_INCOME = "monthly_income"          # month -> income
     TABLE_TARGETS = "meta_targets"           # single-row needs/wants/savings %
+    TABLE_BUCKETS = "funding_buckets"
 
     # Create tables
     with engine.begin() as conn:
@@ -154,6 +155,17 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
                 needs REAL,
                 wants REAL,
                 savings REAL
+            )
+        """))
+        conn.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_BUCKETS} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                goal REAL NOT NULL,
+                current REAL NOT NULL DEFAULT 0,
+                status TEXT CHECK(status IN ('filling','ready','spent','archived')) NOT NULL DEFAULT 'filling',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """))
         exists = conn.execute(text(f"SELECT 1 FROM {TABLE_TARGETS} WHERE id=1")).first()
@@ -204,7 +216,10 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
 </head>
 <body>
 <div class=\"container\">
-  <h1 class=\"mb-3\">Transactions</h1>
+  <div class=\"d-flex justify-content-between align-items-center mb-3\">
+    <h1 class=\"mb-0\">Transactions</h1>
+    <a class=\"btn btn-outline-secondary\" href=\"{{ url_for('buckets_index') }}\">Funding Buckets</a>
+  </div>
 
   <form class=\"d-flex align-items-center gap-2 mb-4\" method=\"get\" action=\"/\">
     <label class=\"form-label m-0\">Month:</label>
@@ -478,6 +493,461 @@ renderPie('pie_sub', pieSub);
 </body>
 </html>
 """
+
+    PAGE_BUCKETS = """
+<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\">
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  <title>Funding Buckets</title>
+  <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>
+  <link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css\" rel=\"stylesheet\">
+  <style>
+    body { padding-top: 1.5rem; }
+  </style>
+</head>
+<body>
+<div class=\"container py-3\">
+  <div class=\"d-flex justify-content-between align-items-center mb-3\">
+    <h1 class=\"h3 mb-0\">Funding Buckets</h1>
+    <a class=\"btn btn-outline-secondary\" href=\"{{ url_for('index') }}\">Back to Transactions</a>
+  </div>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      <div class=\"alert alert-info\">{{ messages[0] }}</div>
+    {% endif %}
+  {% endwith %}
+
+  <div class=\"card mb-4 shadow-sm\">
+    <div class=\"card-body\">
+      <h5 class=\"card-title\">Create bucket</h5>
+      <form class=\"row row-cols-1 row-cols-md-3 g-3\" method=\"post\" action=\"{{ url_for('buckets_add') }}\">
+        <div class=\"col\">
+          <label class=\"form-label\">Name</label>
+          <input class=\"form-control\" name=\"name\" placeholder=\"e.g., Vacation\" required>
+        </div>
+        <div class=\"col\">
+          <label class=\"form-label\">Goal amount</label>
+          <input class=\"form-control\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" placeholder=\"e.g., 1500\" required>
+        </div>
+        <div class=\"col d-flex align-items-end\">
+          <button class=\"btn btn-primary\" type=\"submit\">Add bucket</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class=\"row g-3\">
+    <div class=\"col-12 col-lg-6\">
+      <h5 class=\"mb-2\">Filling</h5>
+      {% for b in filling %}
+        <div class=\"card mb-3 shadow-sm\">
+          <div class=\"card-body\">
+            <div class=\"d-flex justify-content-between align-items-start\">
+              <div>
+                <h6 class=\"mb-1\">{{ b.name }}</h6>
+                <div class=\"text-muted small\">Status: {{ b.status }}</div>
+              </div>
+              <div class=\"d-flex align-items-start gap-2\">
+                <div class=\"text-end fw-semibold\">{{ '%.2f'|format(b.current) }} / {{ '%.2f'|format(b.goal) }}</div>
+                <div class=\"btn-group dropstart\">
+                  <button class=\"btn btn-sm btn-outline-secondary dropdown-toggle\" type=\"button\" data-bs-toggle=\"dropdown\" aria-expanded=\"false\">⋮</button>
+                  <ul class=\"dropdown-menu\">
+                    <li><button class=\"dropdown-item\" type=\"button\" data-bs-toggle=\"collapse\" data-bs-target=\"#edit-b{{ b.id }}\">Edit</button></li>
+                    <li>
+                      <form method=\"post\" action=\"{{ url_for('buckets_delete', bucket_id=b.id) }}\" onsubmit=\"return confirm('Delete this bucket?');\">
+                        {% if show_archived %}<input type=\"hidden\" name=\"show_archived\" value=\"1\">{% endif %}
+                        <button class=\"dropdown-item text-danger\" type=\"submit\">Delete</button>
+                      </form>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+            <div class=\"progress my-2\" style=\"height: 8px;\">
+              <div class=\"progress-bar\" role=\"progressbar\" style=\"width: {{ b.progress_pct }}%;\"></div>
+            </div>
+            <form class=\"row row-cols-1 row-cols-sm-2 g-2\" method=\"post\" action=\"{{ url_for('buckets_contribute', bucket_id=b.id) }}\">
+              {% if show_archived %}<input type=\"hidden\" name=\"show_archived\" value=\"1\">{% endif %}
+              <div class=\"col\">
+                <input class=\"form-control\" name=\"amount\" type=\"number\" step=\"any\" min=\"0\" placeholder=\"Add amount\" required>
+              </div>
+              <div class=\"col d-flex gap-2\">
+                <button class=\"btn btn-outline-primary\" type=\"submit\">Contribute</button>
+                {% if b.status == 'ready' %}
+                  <span class=\"badge text-bg-success ms-auto\">Ready</span>
+                {% endif %}
+              </div>
+            </form>
+            <div class=\"collapse mt-3\" id=\"edit-b{{ b.id }}\">
+              <form class=\"row row-cols-1 row-cols-sm-3 g-2\" method=\"post\" action=\"{{ url_for('buckets_edit', bucket_id=b.id) }}\">
+                {% if show_archived %}<input type=\"hidden\" name=\"show_archived\" value=\"1\">{% endif %}
+                <div class=\"col\">
+                  <label class=\"form-label\">Name</label>
+                  <input class=\"form-control\" name=\"name\" value=\"{{ b.name }}\" required>
+                </div>
+                <div class=\"col\">
+                  <label class=\"form-label\">Goal</label>
+                  <input class=\"form-control\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" value=\"{{ '%.2f'|format(b.goal) }}\" required>
+                </div>
+                <div class=\"col d-flex align-items-end\">
+                  <button class=\"btn btn-outline-secondary\" type=\"submit\">Save</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      {% else %}
+        <div class=\"text-muted\">No filling buckets yet.</div>
+      {% endfor %}
+    </div>
+
+    <div class=\"col-12 col-lg-6\">
+      <h5 class=\"mb-2\">Ready to Spend</h5>
+      {% for b in ready %}
+        <div class=\"card mb-3 shadow-sm\">
+          <div class=\"card-body\">
+            <div class=\"d-flex justify-content-between align-items-start\">
+              <div>
+                <h6 class=\"mb-1\">{{ b.name }}</h6>
+                <div class=\"text-muted small\">Status: {{ b.status }}</div>
+              </div>
+              <div class=\"d-flex align-items-start gap-2\">
+                <div class=\"text-end fw-semibold\">{{ '%.2f'|format(b.current) }} / {{ '%.2f'|format(b.goal) }}</div>
+                <div class=\"btn-group dropstart\">
+                  <button class=\"btn btn-sm btn-outline-secondary dropdown-toggle\" type=\"button\" data-bs-toggle=\"dropdown\" aria-expanded=\"false\">⋮</button>
+                  <ul class=\"dropdown-menu\">
+                    <li><button class=\"dropdown-item\" type=\"button\" data-bs-toggle=\"collapse\" data-bs-target=\"#edit-b{{ b.id }}\">Edit</button></li>
+                    <li>
+                      <form method=\"post\" action=\"{{ url_for('buckets_delete', bucket_id=b.id) }}\" onsubmit=\"return confirm('Delete this bucket?');\">
+                        {% if show_archived %}<input type=\"hidden\" name=\"show_archived\" value=\"1\">{% endif %}
+                        <button class=\"dropdown-item text-danger\" type=\"submit\">Delete</button>
+                      </form>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+            <div class=\"progress my-2\" style=\"height: 8px;\">
+              <div class=\"progress-bar bg-success\" role=\"progressbar\" style=\"width: {{ b.progress_pct }}%;\"></div>
+            </div>
+            <form method=\"post\" action=\"{{ url_for('buckets_spend', bucket_id=b.id) }}\">
+              {% if show_archived %}<input type=\"hidden\" name=\"show_archived\" value=\"1\">{% endif %}
+              <button class=\"btn btn-success\" type=\"submit\">Spend &amp; Archive</button>
+            </form>
+            <div class=\"collapse mt-3\" id=\"edit-b{{ b.id }}\">
+              <form class=\"row row-cols-1 row-cols-sm-3 g-2\" method=\"post\" action=\"{{ url_for('buckets_edit', bucket_id=b.id) }}\">
+                {% if show_archived %}<input type=\"hidden\" name=\"show_archived\" value=\"1\">{% endif %}
+                <div class=\"col\">
+                  <label class=\"form-label\">Name</label>
+                  <input class=\"form-control\" name=\"name\" value=\"{{ b.name }}\" required>
+                </div>
+                <div class=\"col\">
+                  <label class=\"form-label\">Goal</label>
+                  <input class=\"form-control\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" value=\"{{ '%.2f'|format(b.goal) }}\" required>
+                </div>
+                <div class=\"col d-flex align-items-end\">
+                  <button class=\"btn btn-outline-secondary\" type=\"submit\">Save</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      {% else %}
+        <div class=\"text-muted\">No buckets ready yet.</div>
+      {% endfor %}
+
+      <div class=\"mt-4\">
+        <div class=\"d-flex justify-content-between align-items-center mb-2\">
+          <h6 class=\"mb-0\">Recently Completed</h6>
+          {% if not show_archived %}
+            <a class=\"btn btn-sm btn-outline-secondary\" href=\"{{ url_for('buckets_index', show_archived=1) }}\">Show archived</a>
+          {% else %}
+            <a class=\"btn btn-sm btn-outline-secondary\" href=\"{{ url_for('buckets_index') }}\">Hide archived</a>
+          {% endif %}
+        </div>
+        {% for b in completed %}
+          <div class=\"card mb-3 shadow-sm\">
+            <div class=\"card-body\">
+              <div class=\"d-flex justify-content-between align-items-start\">
+                <div>
+                  <h6 class=\"mb-1\">{{ b.name }}</h6>
+                  <div class=\"text-muted small\">{{ b.status }} · Updated {{ b.updated_at }}</div>
+                </div>
+                <div class=\"btn-group dropstart\">
+                  <button class=\"btn btn-sm btn-outline-secondary dropdown-toggle\" type=\"button\" data-bs-toggle=\"dropdown\" aria-expanded=\"false\">⋮</button>
+                  <ul class=\"dropdown-menu\">
+                    <li><button class=\"dropdown-item\" type=\"button\" data-bs-toggle=\"collapse\" data-bs-target=\"#edit-b{{ b.id }}\">Edit</button></li>
+                    <li>
+                      <form method=\"post\" action=\"{{ url_for('buckets_delete', bucket_id=b.id) }}\" onsubmit=\"return confirm('Delete this bucket?');\">
+                        {% if show_archived %}<input type=\"hidden\" name=\"show_archived\" value=\"1\">{% endif %}
+                        <button class=\"dropdown-item text-danger\" type=\"submit\">Delete</button>
+                      </form>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+              <div class=\"collapse mt-3\" id=\"edit-b{{ b.id }}\">
+                <form class=\"row row-cols-1 row-cols-sm-3 g-2\" method=\"post\" action=\"{{ url_for('buckets_edit', bucket_id=b.id) }}\">
+                  {% if show_archived %}<input type=\"hidden\" name=\"show_archived\" value=\"1\">{% endif %}
+                  <div class=\"col\">
+                    <label class=\"form-label\">Name</label>
+                    <input class=\"form-control\" name=\"name\" value=\"{{ b.name }}\" required>
+                  </div>
+                  <div class=\"col\">
+                    <label class=\"form-label\">Goal</label>
+                    <input class=\"form-control\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" value=\"{{ '%.2f'|format(b.goal) }}\" required>
+                  </div>
+                  <div class=\"col d-flex align-items-end\">
+                    <button class=\"btn btn-outline-secondary\" type=\"submit\">Save</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+        {% else %}
+          <div class=\"text-muted\">No completed buckets yet.</div>
+        {% endfor %}
+
+        {% if show_archived %}
+          <div class=\"mt-3\">
+            <h6>Archived</h6>
+            {% for b in archived %}
+              <div class=\"card mb-3 shadow-sm\">
+                <div class=\"card-body\">
+                  <div class=\"d-flex justify-content-between align-items-start\">
+                    <div>
+                      <h6 class=\"mb-1\">{{ b.name }}</h6>
+                      <div class=\"text-muted small\">archived · Updated {{ b.updated_at }}</div>
+                    </div>
+                    <div class=\"btn-group dropstart\">
+                      <button class=\"btn btn-sm btn-outline-secondary dropdown-toggle\" type=\"button\" data-bs-toggle=\"dropdown\" aria-expanded=\"false\">⋮</button>
+                      <ul class=\"dropdown-menu\">
+                        <li><button class=\"dropdown-item\" type=\"button\" data-bs-toggle=\"collapse\" data-bs-target=\"#edit-b{{ b.id }}\">Edit</button></li>
+                        <li>
+                          <form method=\"post\" action=\"{{ url_for('buckets_delete', bucket_id=b.id) }}\" onsubmit=\"return confirm('Delete this bucket?');\">
+                            <input type=\"hidden\" name=\"show_archived\" value=\"1\">
+                            <button class=\"dropdown-item text-danger\" type=\"submit\">Delete</button>
+                          </form>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                  <div class=\"collapse mt-3\" id=\"edit-b{{ b.id }}\">
+                    <form class=\"row row-cols-1 row-cols-sm-3 g-2\" method=\"post\" action=\"{{ url_for('buckets_edit', bucket_id=b.id) }}\">
+                      <input type=\"hidden\" name=\"show_archived\" value=\"1\">
+                      <div class=\"col\">
+                        <label class=\"form-label\">Name</label>
+                        <input class=\"form-control\" name=\"name\" value=\"{{ b.name }}\" required>
+                      </div>
+                      <div class=\"col\">
+                        <label class=\"form-label\">Goal</label>
+                        <input class=\"form-control\" name=\"goal\" type=\"number\" step=\"any\" min=\"0\" value=\"{{ '%.2f'|format(b.goal) }}\" required>
+                      </div>
+                      <div class=\"col d-flex align-items-end\">
+                        <button class=\"btn btn-outline-secondary\" type=\"submit\">Save</button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              </div>
+            {% else %}
+              <div class=\"text-muted\">No archived buckets.</div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+<script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js\"></script>
+</body>
+</html>
+"""
+
+    def _enrich_bucket_rows(rows):
+        enriched = []
+        for r in rows:
+            data = dict(r)
+            goal = float(data.get("goal") or 0.0)
+            current = float(data.get("current") or 0.0)
+            pct = 0.0 if goal <= 0 else min(100.0, round((current / goal) * 100, 2))
+            data["goal"] = goal
+            data["current"] = current
+            data["progress_pct"] = pct
+            enriched.append(data)
+        return enriched
+
+    @app.get("/buckets")
+    def buckets_index():
+        show_archived = request.args.get("show_archived") == "1"
+        with engine.connect() as conn:
+            filling_rows = conn.execute(text(f"""
+                SELECT id, name, goal, current, status, created_at, updated_at
+                FROM {TABLE_BUCKETS}
+                WHERE status = 'filling'
+                ORDER BY datetime(created_at) DESC
+            """)).mappings().all()
+            ready_rows = conn.execute(text(f"""
+                SELECT id, name, goal, current, status, created_at, updated_at
+                FROM {TABLE_BUCKETS}
+                WHERE status = 'ready'
+                ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
+            """)).mappings().all()
+            completed_rows = conn.execute(text(f"""
+                SELECT id, name, goal, current, status, created_at, updated_at
+                FROM {TABLE_BUCKETS}
+                WHERE status IN ('spent','archived')
+                ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
+                LIMIT 10
+            """)).mappings().all()
+            archived_rows = []
+            if show_archived:
+                archived_rows = conn.execute(text(f"""
+                    SELECT id, name, goal, current, status, created_at, updated_at
+                    FROM {TABLE_BUCKETS}
+                    WHERE status = 'archived'
+                    ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
+                """)).mappings().all()
+
+        return render_template_string(
+            PAGE_BUCKETS,
+            filling=_enrich_bucket_rows(filling_rows),
+            ready=_enrich_bucket_rows(ready_rows),
+            completed=_enrich_bucket_rows(completed_rows),
+            archived=_enrich_bucket_rows(archived_rows),
+            show_archived=show_archived,
+        )
+
+    @app.post("/buckets/add")
+    def buckets_add():
+        name = (request.form.get("name") or "").strip()
+        goal_raw = (request.form.get("goal") or "").strip()
+        try:
+            goal = float(goal_raw)
+            if goal <= 0:
+                raise ValueError
+        except ValueError:
+            flash("Goal must be a positive number.")
+            return redirect(url_for("buckets_index"))
+        if not name:
+            flash("Bucket name is required.")
+            return redirect(url_for("buckets_index"))
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+                INSERT INTO {TABLE_BUCKETS} (name, goal, current, status)
+                VALUES (:name, :goal, 0, 'filling')
+            """), {"name": name, "goal": goal})
+        flash("Bucket created.")
+        return redirect(url_for("buckets_index"))
+
+    @app.post("/buckets/contribute/<int:bucket_id>")
+    def buckets_contribute(bucket_id: int):
+        show_archived = (request.form.get("show_archived") or "").strip() == "1"
+        amount_raw = (request.form.get("amount") or "").strip()
+        try:
+            amount = float(amount_raw)
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            flash("Contribution must be a positive number.")
+            return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
+
+        with engine.begin() as conn:
+            bucket = conn.execute(text(f"""
+                SELECT id, goal, current, status FROM {TABLE_BUCKETS} WHERE id = :id
+            """), {"id": bucket_id}).mappings().first()
+            if not bucket:
+                flash("Bucket not found.")
+                return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
+
+            goal = float(bucket["goal"] or 0.0)
+            new_current = float(bucket["current"] or 0.0) + amount
+            status = bucket["status"]
+            if status not in ("spent", "archived") and goal > 0 and new_current >= goal:
+                status = "ready"
+
+            now_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(text(f"""
+                UPDATE {TABLE_BUCKETS}
+                SET current = :cur,
+                    status = :status,
+                    updated_at = :updated_at
+                WHERE id = :id
+            """), {"cur": new_current, "status": status, "updated_at": now_ts, "id": bucket_id})
+        flash("Contribution added.")
+        return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
+
+    @app.post("/buckets/edit/<int:bucket_id>")
+    def buckets_edit(bucket_id: int):
+        show_archived = (request.form.get("show_archived") or "").strip() == "1"
+        name = (request.form.get("name") or "").strip()
+        goal_raw = (request.form.get("goal") or "").strip()
+        try:
+            goal = float(goal_raw)
+            if goal <= 0:
+                raise ValueError
+        except ValueError:
+            flash("Goal must be a positive number.")
+            return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
+        if not name:
+            flash("Bucket name is required.")
+            return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
+
+        with engine.begin() as conn:
+            bucket = conn.execute(text(f"""
+                SELECT id, goal, current, status FROM {TABLE_BUCKETS} WHERE id = :id
+            """), {"id": bucket_id}).mappings().first()
+            if not bucket:
+                flash("Bucket not found.")
+                return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
+            current = float(bucket["current"] or 0.0)
+            status = bucket["status"]
+            if status not in ("spent", "archived") and current >= goal and goal > 0:
+                status = "ready"
+            now_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(text(f"""
+                UPDATE {TABLE_BUCKETS}
+                SET name = :name,
+                    goal = :goal,
+                    status = :status,
+                    updated_at = :updated_at
+                WHERE id = :id
+            """), {"name": name, "goal": goal, "status": status, "updated_at": now_ts, "id": bucket_id})
+        flash("Bucket updated.")
+        return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
+
+    @app.post("/buckets/spend/<int:bucket_id>")
+    def buckets_spend(bucket_id: int):
+        show_archived = (request.form.get("show_archived") or "").strip() == "1"
+        now_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with engine.begin() as conn:
+            exists = conn.execute(text(f"SELECT 1 FROM {TABLE_BUCKETS} WHERE id = :id"), {"id": bucket_id}).first()
+            if not exists:
+                flash("Bucket not found.")
+                return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
+            conn.execute(text(f"""
+                UPDATE {TABLE_BUCKETS}
+                SET status = 'archived',
+                    current = 0,
+                    updated_at = :updated_at
+                WHERE id = :id
+            """), {"updated_at": now_ts, "id": bucket_id})
+        flash("Bucket archived.")
+        return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
+
+    @app.post("/buckets/delete/<int:bucket_id>")
+    def buckets_delete(bucket_id: int):
+        show_archived = (request.form.get("show_archived") or "").strip() == "1"
+        with engine.begin() as conn:
+            result = conn.execute(text(f"DELETE FROM {TABLE_BUCKETS} WHERE id = :id"), {"id": bucket_id})
+        if result.rowcount:
+            flash("Bucket deleted.")
+        else:
+            flash("Bucket not found.")
+        return redirect(url_for("buckets_index", show_archived=1) if show_archived else url_for("buckets_index"))
 
     @app.get("/")
     def index():
@@ -799,6 +1269,7 @@ renderPie('pie_sub', pieSub);
     app.config["_TABLE_META_MAP"] = TABLE_META_MAP
     app.config["_TABLE_INCOME"] = TABLE_INCOME
     app.config["_TABLE_TARGETS"] = TABLE_TARGETS
+    app.config["_TABLE_BUCKETS"] = TABLE_BUCKETS
 
     return app
 
@@ -1164,4 +1635,3 @@ class TransactionsWebAppTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
