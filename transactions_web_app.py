@@ -318,12 +318,13 @@ def create_app(db_url: str | None = None, *, engine_override=None) -> Flask:
           </div>
           <div class=\"mt-2 d-flex gap-2 flex-wrap\">
             {% for t in targets_status %}
-              <span class=\"badge text-bg-{{ 'success' if t.met else 'danger' }}\">{{ t.name }} {{ 'on track' if t.met else 'off track' }}</span>
+              <span class=\"badge text-bg-{{ 'success' if t.met else 'warning' }}\">{{ t.name }} {{ '%.1f'|format(t.pct) }}% · {{ '%.2f'|format(t.remaining) }} {{ t.direction }}</span>
             {% endfor %}
           </div>
           <div class=\"text-muted small mt-2\">
             Income basis: {{ '%.2f'|format(effective_income or 0) }}
             {% if manual_income_set %}(override set){% else %}(auto from payroll){% endif %}.
+            Tracked spend this month: {{ '%.2f'|format(tracked_spend_total) }} (categorized expenses); net expenses from transactions: {{ '%.2f'|format(-month_total) }}.
           </div>
         </div>
       </div>
@@ -1545,9 +1546,11 @@ renderPie('pie_sub', pieSub);
             rec["net"] = net
             payroll_rows.append(rec)
 
-        # Use payroll net as default income if not manually set
+        # Use payroll net as default income if not manually set.
+        # For targets, include pre-tax savings (401k/HSA/ESPP) when using payroll auto mode so they aren't double-counted as "extra" savings.
         manual_income_set = income is not None
-        effective_income = income if manual_income_set else payroll_summary["net"]
+        auto_income_base = payroll_summary["net"] + payroll_summary["k401"] + payroll_summary["hsa"] + payroll_summary["espp"]
+        effective_income = income if manual_income_set else auto_income_base
 
         # Budget summary (planned from income * targets, actual from meta_totals)
         meta_summary = []
@@ -1566,13 +1569,37 @@ renderPie('pie_sub', pieSub);
         meta_summary.append({"name": "Savings", "planned": planned_savings, "actual": actual_savings, "remaining": (planned_savings - actual_savings)})
 
         targets_status = []
-        targets_status.append({"name": "Needs", "met": actual_needs <= planned_needs + 1e-6})
-        targets_status.append({"name": "Wants", "met": actual_wants <= planned_wants + 1e-6})
-        targets_status.append({"name": "Savings", "met": actual_savings >= planned_savings - 1e-6})
+        for name, planned, actual, invert in [
+            ("Needs", planned_needs, actual_needs, False),
+            ("Wants", planned_wants, actual_wants, False),
+            ("Savings", planned_savings, actual_savings, True),
+        ]:
+            if planned <= 0:
+                pct = 0.0
+                remaining = 0.0
+                direction = "left" if not invert else "short"
+            else:
+                pct = round((actual / planned) * 100, 1)
+                remaining = planned - actual
+                if invert:
+                    direction = "short" if remaining >= 0 else "over"
+                else:
+                    direction = "left" if remaining >= 0 else "over"
+            status = {
+                "name": name,
+                "planned": planned,
+                "actual": actual,
+                "pct": pct,
+                "remaining": abs(remaining),
+                "direction": direction,
+                "met": (actual <= planned + 1e-6) if not invert else (actual >= planned - 1e-6),
+            }
+            targets_status.append(status)
 
         # Overall month total (net)
         month_total = sum([float(r["total_amount"] or 0) for r in totals_by_cat])
         net_after_expenses = payroll_summary["net"] + month_total
+        tracked_spend_total = sum(spend_map.values())
 
         # Bucket summaries
         bucket_filling = _enrich_bucket_rows(bucket_filling_rows, mappings)
@@ -1609,6 +1636,7 @@ renderPie('pie_sub', pieSub);
             effective_income=effective_income,
             manual_income_set=manual_income_set,
             targets_status=targets_status,
+            tracked_spend_total=tracked_spend_total,
             bucket_filling=bucket_filling,
             bucket_ready=bucket_ready,
             bucket_recent=bucket_recent,
